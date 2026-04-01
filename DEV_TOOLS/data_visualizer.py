@@ -10,7 +10,7 @@ os.environ["QT_API"] = "pyqt6"
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QComboBox, QLabel, QCheckBox)
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 class DataProcessor(QThread):
     data_ready = pyqtSignal(object, object)
@@ -24,7 +24,7 @@ class DataProcessor(QThread):
 
     def run(self):
         if self.prices_df is None or len(self.prices_df) == 0:
-            self.data_ready.emit({'time': []}, {'time': []})
+            self.data_ready.emit({'time': []}, {'time': [], 'quantity': []})
             return
 
         p_filtered = self.prices_df.filter(pl.col("product") == self.product)
@@ -32,7 +32,7 @@ class DataProcessor(QThread):
         if self.trades_df is not None and "day" in self.trades_df.columns and len(self.trades_df) > 0:
             t_filtered = self.trades_df.filter(pl.col("symbol") == self.product)
         else:
-            t_filtered = pl.DataFrame() # Empty fallback
+            t_filtered = pl.DataFrame()
 
         if self.day_val == "All":
             p_filtered = p_filtered.sort(["day", "timestamp"])
@@ -76,7 +76,8 @@ class DataProcessor(QThread):
         
         t_data = {
             'time': t_filtered['plot_time'].to_numpy() if len(t_filtered) > 0 else np.array([]),
-            'price': t_filtered['price'].to_numpy() if len(t_filtered) > 0 else np.array([])
+            'price': t_filtered['price'].to_numpy() if len(t_filtered) > 0 else np.array([]),
+            'quantity': t_filtered['quantity'].to_numpy() if len(t_filtered) > 0 and 'quantity' in t_filtered.columns else np.array([])
         }
 
         self.data_ready.emit(p_data, t_data)
@@ -90,6 +91,7 @@ class ProsperityVisualizer(QMainWindow):
         
         self.prices_df = None
         self.trades_df = None
+        self.has_plotted_data = False
         
         self.spread_fill_ask = None 
         self.spread_fill_bid = None 
@@ -97,12 +99,14 @@ class ProsperityVisualizer(QMainWindow):
         self.curve_bid = None 
         self.obi_curve = None
         
+        self.scatter_blue = None
+        self.scatter_yellow = None
+        self.scatter_red = None
+        
         self.init_ui()
 
     def scan_directory(self):
-        """Scans the current directory for Prosperity format CSVs and groups them by round."""
         rounds = {}
-        # Regex to capture Round number and Day number
         price_pattern = re.compile(r"prices_round_(\d+)_day_(-?\d+)\.csv")
         trade_pattern = re.compile(r"trades_round_(\d+)_day_(-?\d+)\.csv")
 
@@ -132,7 +136,6 @@ class ProsperityVisualizer(QMainWindow):
 
         controls_layout = QHBoxLayout()
         
-        # --- NEW: Round Selector ---
         self.round_combo = QComboBox()
         available_rounds = sorted(list(self.rounds_map.keys()), key=int) if self.rounds_map else ["None"]
         self.round_combo.addItems(available_rounds)
@@ -144,10 +147,25 @@ class ProsperityVisualizer(QMainWindow):
         self.day_combo = QComboBox()
         self.day_combo.currentTextChanged.connect(self.start_processing)
 
-        self.spread_checkbox = QCheckBox("Show L1 Spread")
+        self.spread_checkbox = QCheckBox("L1 Spread")
         self.spread_checkbox.setChecked(True)
         self.spread_checkbox.setStyleSheet("color: white; font-weight: bold;")
         self.spread_checkbox.stateChanged.connect(self.toggle_spread)
+
+        self.exec_blue_cb = QCheckBox("Vol 1-3")
+        self.exec_blue_cb.setChecked(True)
+        self.exec_blue_cb.setStyleSheet("color: #00BFFF; font-weight: bold;")
+        self.exec_blue_cb.stateChanged.connect(self.toggle_executions)
+
+        self.exec_yellow_cb = QCheckBox("Vol 4")
+        self.exec_yellow_cb.setChecked(True)
+        self.exec_yellow_cb.setStyleSheet("color: #FFFF00; font-weight: bold;")
+        self.exec_yellow_cb.stateChanged.connect(self.toggle_executions)
+
+        self.exec_red_cb = QCheckBox("Vol 5+")
+        self.exec_red_cb.setChecked(True)
+        self.exec_red_cb.setStyleSheet("color: #FF0000; font-weight: bold;")
+        self.exec_red_cb.stateChanged.connect(self.toggle_executions)
 
         self.status_label = QLabel("Status: Idle")
         self.status_label.setStyleSheet("color: #00FF00; font-weight: bold;")
@@ -159,6 +177,11 @@ class ProsperityVisualizer(QMainWindow):
         controls_layout.addWidget(QLabel("Day:"))
         controls_layout.addWidget(self.day_combo)
         controls_layout.addWidget(self.spread_checkbox) 
+        
+        controls_layout.addWidget(self.exec_blue_cb)
+        controls_layout.addWidget(self.exec_yellow_cb)
+        controls_layout.addWidget(self.exec_red_cb)
+        
         controls_layout.addStretch()
         controls_layout.addWidget(self.status_label)
         layout.addLayout(controls_layout)
@@ -178,35 +201,129 @@ class ProsperityVisualizer(QMainWindow):
         self.p1.addLegend()
         self.p2.addLegend()
 
-        # Trigger initial data load
+        # ==========================================
+        # CROSSHAIR & DYNAMIC LABEL INITIALIZATION
+        # ==========================================
+        
+        crosshair_pen = pg.mkPen(color=(180, 180, 180, 150), width=1.5, style=Qt.PenStyle.DashLine)
+        
+        # Vertical lines (Time)
+        self.vLine1 = pg.InfiniteLine(angle=90, movable=False, pen=crosshair_pen)
+        self.vLine2 = pg.InfiniteLine(angle=90, movable=False, pen=crosshair_pen)
+        
+        # Horizontal lines (Price / Volume)
+        self.hLine1 = pg.InfiniteLine(angle=0, movable=False, pen=crosshair_pen)
+        self.hLine2 = pg.InfiniteLine(angle=0, movable=False, pen=crosshair_pen)
+
+        self.p1.addItem(self.vLine1, ignoreBounds=True)
+        self.p1.addItem(self.hLine1, ignoreBounds=True)
+        
+        self.p2.addItem(self.vLine2, ignoreBounds=True)
+        self.p2.addItem(self.hLine2, ignoreBounds=True)
+        
+        # Pop-out Text Labels attached to cursor
+        self.label_p1 = pg.TextItem(anchor=(-0.1, 1.1), fill=pg.mkBrush(0, 0, 0, 200), border=pg.mkPen(100, 100, 100))
+        self.label_p2 = pg.TextItem(anchor=(-0.1, 1.1), fill=pg.mkBrush(0, 0, 0, 200), border=pg.mkPen(100, 100, 100))
+        
+        self.p1.addItem(self.label_p1, ignoreBounds=True)
+        self.p2.addItem(self.label_p2, ignoreBounds=True)
+        
+        self.hide_crosshairs()
+
+        # Connect mouse movement
+        self.graph_widget.scene().sigMouseMoved.connect(self.mouse_moved)
+
         if self.rounds_map:
             self.load_round_data(self.round_combo.currentText())
         else:
             self.status_label.setText("Status: No CSV files found in directory.")
             self.status_label.setStyleSheet("color: red; font-weight: bold;")
 
+    def hide_crosshairs(self):
+        self.vLine1.hide()
+        self.vLine2.hide()
+        self.hLine1.hide()
+        self.hLine2.hide()
+        self.label_p1.hide()
+        self.label_p2.hide()
+
+    def mouse_moved(self, evt):
+        """Triggered when mouse moves over the graph widget."""
+        pos = evt
+        if not self.has_plotted_data:
+            return
+
+        # Check if mouse is inside Plot 1
+        if self.p1.sceneBoundingRect().contains(pos):
+            mousePoint = self.p1.vb.mapSceneToView(pos)
+            x, y = mousePoint.x(), mousePoint.y()
+            
+            self.vLine1.setPos(x)
+            self.vLine2.setPos(x)
+            self.hLine1.setPos(y)
+            
+            self.vLine1.show()
+            self.vLine2.show()
+            self.hLine1.show()
+            self.hLine2.hide()
+            
+            # Formatted HTML pop-out box
+            html_str = f"""
+            <div style='text-align: left;'>
+                <span style='color: #FFFFFF; font-size: 11pt;'>Time: </span><b style='color: #00BFFF; font-size: 11pt;'>{int(x)}</b><br>
+                <span style='color: #FFFFFF; font-size: 11pt;'>Price: </span><b style='color: #00FF00; font-size: 11pt;'>{y:.2f}</b>
+            </div>
+            """
+            self.label_p1.setHtml(html_str)
+            self.label_p1.setPos(x, y)
+            self.label_p1.show()
+            self.label_p2.hide()
+            
+        # Check if mouse is inside Plot 2
+        elif self.p2.sceneBoundingRect().contains(pos):
+            mousePoint = self.p2.vb.mapSceneToView(pos)
+            x, y = mousePoint.x(), mousePoint.y()
+            
+            self.vLine1.setPos(x)
+            self.vLine2.setPos(x)
+            self.hLine2.setPos(y)
+            
+            self.vLine1.show()
+            self.vLine2.show()
+            self.hLine2.show()
+            self.hLine1.hide()
+            
+            html_str = f"""
+            <div style='text-align: left;'>
+                <span style='color: #FFFFFF; font-size: 11pt;'>Time: </span><b style='color: #00BFFF; font-size: 11pt;'>{int(x)}</b><br>
+                <span style='color: #FFFFFF; font-size: 11pt;'>Level: </span><b style='color: #FFD700; font-size: 11pt;'>{y:.2f}</b>
+            </div>
+            """
+            self.label_p2.setHtml(html_str)
+            self.label_p2.setPos(x, y)
+            self.label_p2.show()
+            self.label_p1.hide()
+        else:
+            self.hide_crosshairs()
+
     def load_round_data(self, round_str):
-        """Loads all CSVs associated with the selected round dynamically."""
         if round_str == "None" or round_str not in self.rounds_map: return
         
         self.status_label.setText(f"Status: Loading Round {round_str} files into memory...")
         self.status_label.setStyleSheet("color: #FFA500; font-weight: bold;")
-        QApplication.processEvents() # Force UI to update text immediately
+        QApplication.processEvents()
 
         files = self.rounds_map[round_str]
         
-        # Load Prices
         p_dfs = []
         for f in files['prices']:
             filepath = os.path.join(self.data_dir, f)
             p_dfs.append(pl.read_csv(filepath, separator=";"))
         self.prices_df = pl.concat(p_dfs) if p_dfs else None
 
-        # Load Trades and safely inject the "day" column
         t_dfs = []
         for f in files['trades']:
             filepath = os.path.join(self.data_dir, f)
-            # Extract day from filename since it's not in the trade CSV
             day_match = re.match(r"trades_round_\d+_day_(-?\d+)\.csv", f)
             if day_match:
                 day_val = int(day_match.group(1))
@@ -215,7 +332,6 @@ class ProsperityVisualizer(QMainWindow):
                 t_dfs.append(df)
         self.trades_df = pl.concat(t_dfs) if t_dfs else None
 
-        # Update dependent dropdowns (block signals to prevent premature plotting)
         self.product_combo.blockSignals(True)
         self.day_combo.blockSignals(True)
         
@@ -241,6 +357,11 @@ class ProsperityVisualizer(QMainWindow):
         if self.curve_ask: self.curve_ask.setVisible(is_checked)
         if self.curve_bid: self.curve_bid.setVisible(is_checked)
 
+    def toggle_executions(self):
+        if self.scatter_blue: self.scatter_blue.setVisible(self.exec_blue_cb.isChecked())
+        if self.scatter_yellow: self.scatter_yellow.setVisible(self.exec_yellow_cb.isChecked())
+        if self.scatter_red: self.scatter_red.setVisible(self.exec_red_cb.isChecked())
+
     def start_processing(self):
         if self.prices_df is None or self.product_combo.count() == 0: return
 
@@ -249,6 +370,9 @@ class ProsperityVisualizer(QMainWindow):
         self.round_combo.setEnabled(False)
         self.product_combo.setEnabled(False)
         self.day_combo.setEnabled(False)
+        
+        self.has_plotted_data = False
+        self.hide_crosshairs()
 
         product = self.product_combo.currentText()
         day_text = self.day_combo.currentText()
@@ -261,6 +385,21 @@ class ProsperityVisualizer(QMainWindow):
     def on_data_ready(self, p_data, t_data):
         self.p1.clear()
         self.p2.clear()
+        
+        # Re-add crosshair items since clear() removes everything
+        self.p1.addItem(self.vLine1, ignoreBounds=True)
+        self.p1.addItem(self.hLine1, ignoreBounds=True)
+        self.p1.addItem(self.label_p1, ignoreBounds=True)
+        
+        self.p2.addItem(self.vLine2, ignoreBounds=True)
+        self.p2.addItem(self.hLine2, ignoreBounds=True)
+        self.p2.addItem(self.label_p2, ignoreBounds=True)
+        
+        self.hide_crosshairs()
+
+        self.scatter_blue = None
+        self.scatter_yellow = None
+        self.scatter_red = None
 
         if len(p_data['time']) == 0:
             self.reset_ui("Status: No Data")
@@ -284,13 +423,38 @@ class ProsperityVisualizer(QMainWindow):
         
         self.toggle_spread()
 
-        if len(t_data['time']) > 0:
-            scatter = pg.ScatterPlotItem(
-                x=t_data['time'], y=t_data['price'], 
-                pen=pg.mkPen(None), brush=pg.mkBrush('#FF1493'), 
-                size=8, symbol='x', name="Executions", pxMode=True
-            )
-            self.p1.addItem(scatter)
+        if len(t_data['time']) > 0 and len(t_data['quantity']) > 0:
+            q = np.abs(t_data['quantity']) 
+            
+            mask_blue = (q >= 1) & (q <= 3)
+            mask_yellow = (q == 4)
+            mask_red = (q >= 5)
+
+            if np.any(mask_blue):
+                self.scatter_blue = pg.ScatterPlotItem(
+                    x=t_data['time'][mask_blue], y=t_data['price'][mask_blue], 
+                    pen=pg.mkPen('#00BFFF', width=2), brush=pg.mkBrush(None), 
+                    size=10, symbol='x', name="Exec Vol 1-3", pxMode=True
+                )
+                self.p1.addItem(self.scatter_blue)
+
+            if np.any(mask_yellow):
+                self.scatter_yellow = pg.ScatterPlotItem(
+                    x=t_data['time'][mask_yellow], y=t_data['price'][mask_yellow], 
+                    pen=pg.mkPen('#FFFF00', width=2), brush=pg.mkBrush(None), 
+                    size=10, symbol='x', name="Exec Vol 4", pxMode=True
+                )
+                self.p1.addItem(self.scatter_yellow)
+
+            if np.any(mask_red):
+                self.scatter_red = pg.ScatterPlotItem(
+                    x=t_data['time'][mask_red], y=t_data['price'][mask_red], 
+                    pen=pg.mkPen('#FF0000', width=2), brush=pg.mkBrush(None), 
+                    size=10, symbol='x', name="Exec Vol 5+", pxMode=True
+                )
+                self.p1.addItem(self.scatter_red)
+
+            self.toggle_executions()
 
         self.p2.plot(p_data['time'], p_data['bid_vol'], fillLevel=0, 
                      brush=(0, 255, 0, 150), pen='#00FF00', name='Bid Vol', 
@@ -313,7 +477,8 @@ class ProsperityVisualizer(QMainWindow):
 
         self.p1.autoRange()
         self.p2.autoRange()
-
+        
+        self.has_plotted_data = True
         self.reset_ui("Status: Ready")
 
     def reset_ui(self, status):
@@ -338,11 +503,8 @@ def main():
         QCheckBox::indicator { width: 15px; height: 15px; }
     """)
 
-    # NOTE: Set this to the folder containing your CSV files. 
-    # Use "." for the current working directory.
     DATA_DIR = r"F:\PROSPERITY4\Tutorial Round\TUTORIAL_ROUND_1"
     
-    # Fallback to current directory if the hardcoded path doesn't exist
     if not os.path.exists(DATA_DIR):
         DATA_DIR = "."
 
