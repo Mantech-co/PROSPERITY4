@@ -6,7 +6,7 @@ import pyqtgraph as pg
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QComboBox, QLabel, QPushButton, QFileDialog, QTabWidget, QFrame
+    QComboBox, QLabel, QPushButton, QFileDialog, QTabWidget, QFrame, QMessageBox
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QRectF, Qt
 from PyQt6.QtGui import QShortcut, QKeySequence, QFont
@@ -160,6 +160,12 @@ class LogVisualizer(QMainWindow):
         controls.addStretch()
         self.lbl_zoom = QLabel("Mode: XY"); self.lbl_zoom.setStyleSheet(f"color: {DIM};")
         controls.addWidget(self.lbl_zoom)
+
+        btn_export = QPushButton("💾 Export Custom CSV")
+        btn_export.setToolTip("Export all custom LOGVIZ data to a CSV file")
+        btn_export.clicked.connect(self._export_custom_csv)
+        controls.addWidget(btn_export)
+
         main_layout.addLayout(controls)
 
         # Tabs
@@ -254,6 +260,25 @@ class LogVisualizer(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Open Log", "", "Log (*.log *.json)")
         if path: self._load_file(path)
 
+    def _export_custom_csv(self):
+        custom = (self.data or {}).get('custom', {})
+        if not custom:
+            QMessageBox.information(self, "No Data", "No custom LOGVIZ data to export.\nMake sure your strategy prints LOGVIZ: lines.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Custom Data", "custom_data.csv", "CSV (*.csv)")
+        if not path:
+            return
+        # Build unified rows: timestamp + one column per key
+        all_ts = sorted(set(ts for pts in custom.values() for ts, _ in pts))
+        rows = ['timestamp,' + ','.join(custom.keys())]
+        ts_map = {k: dict(pts) for k, pts in custom.items()}
+        for ts in all_ts:
+            row = [str(int(ts))] + [str(ts_map[k].get(ts, '')) for k in custom]
+            rows.append(','.join(row))
+        with open(path, 'w', newline='') as f:
+            f.write('\n'.join(rows))
+        QMessageBox.information(self, "Exported", f"Custom data saved to:\n{path}")
+
     def _load_file(self, path):
         with open(path, encoding='utf-8') as f:
             raw = json.load(f)
@@ -317,9 +342,31 @@ class LogVisualizer(QMainWindow):
         else: self.img_item.setVisible(False)
         self.p_m.autoRange(); self.p_pnl.autoRange()
 
+def _auto_detect_log(script_dir: str):
+    """Return path if exactly one .log file exists next to the script, else None."""
+    logs = [f for f in os.listdir(script_dir) if f.endswith('.log')]
+    return os.path.join(script_dir, logs[0]) if len(logs) == 1 else None
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_STYLE)
-    win = LogVisualizer(sys.argv[1] if len(sys.argv)>1 else None)
+
+    # Resolve startup log path:
+    #   1. CLI argument
+    #   2. Single .log in script directory (auto-detect)
+    #   3. Open file dialog
+    if len(sys.argv) > 1:
+        startup_log = sys.argv[1]
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        startup_log = _auto_detect_log(script_dir)
+        if startup_log is None:
+            # Multiple or zero logs found — let user pick
+            startup_log, _ = QFileDialog.getOpenFileName(
+                None, "Open Log File", script_dir, "Log (*.log *.json)"
+            )
+            startup_log = startup_log or None  # empty string → None
+
+    win = LogVisualizer(startup_log)
     win.show()
     sys.exit(app.exec())
