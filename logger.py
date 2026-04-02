@@ -3,48 +3,38 @@ logger.py — Prosperity Structured Logger
 =========================================
 Drop this file next to your main trading bot file and import it.
 
-The Logger class encodes arbitrary key→value data into a single-line JSON
-string prefixed with "LOGVIZ:" and printed to stdout.  The log visualizer
-(log_visualizer.py) picks up every line that starts with "LOGVIZ:" from the
-lambdaLog field of the sandbox output and automatically plots each key as a
-separate time-series.
+This module provides the `Logger` class, which helps you emit structured logs
+that the Prosperity Log Visualizer (log_visualizer.py) can parse and display.
 
-Quick-start
------------
+It supports two types of logging:
+1.  **Time-series Logging (`log`)**: For numeric data (spreads, positions, mid
+    prices, etc.) that you want to plot as line charts.
+2.  **Debug Logging (`debug`)**: For text messages, warnings, or errors that
+    you want to see in a searchable, color-coded table (Logcat-style).
+
+Usage Example:
+--------------
     from logger import Logger
 
     class Trader:
         def __init__(self):
             self.logger = Logger()
 
-        def run(self, state: TradingState) -> tuple[dict, list, list]:
-            # log whatever numeric values you want plotted
+        def run(self, state: TradingState):
+            # 1. Log numeric data for plotting (Market View / PnL / Custom tabs)
             self.logger.log(state.timestamp,
-                spread     = ask1 - bid1,
-                position   = state.position.get('TOMATOES', 0),
-                fair_value = my_computed_fair,
+                mid_price = compute_mid(state),
+                position  = state.position.get('AMETHYSTS', 0)
             )
-            # ... rest of your logic ...
-            return orders, conversions, self.logger.flush()
 
-    # In the actual entry-point that Prosperity calls:
-    trader = Trader()
-    def run(state: TradingState):
-        orders, conversions, logs = trader.run(state)
-        # Prosperity captures anything printed during run() as lambdaLog
-        return orders, conversions, logs
+            # 2. Log text messages for the "Logs" tab
+            if something_wrong:
+                self.logger.debug(state.timestamp, "Price gap too high!", tag="WARN", product="AMETHYSTS")
 
-Notes
------
-* Values MUST be numeric (int or float).  The visualizer ignores non-numeric.
-* All keys are plotted on a shared time-axis so different keys can be
-  visually compared.
-* Calling flush() returns the accumulated log string for the current
-  timestamp and resets the internal buffer.  Pass it as the third return
-  value from your trader if Prosperity expects a log string; otherwise just
-  call self.logger.log() and the print happens immediately via auto_print.
-* auto_print=True (default) prints immediately inside log(); set to False if
-  you prefer to collect and return via flush().
+            # ... logic ...
+            
+            # Use self.logger.flush() as the 3rd return value if auto_print=False
+            return orders, conversions, ""
 """
 
 import json
@@ -53,93 +43,72 @@ from typing import Any
 
 class Logger:
     """
-    Emit LOGVIZ-encoded lines that log_visualizer.py can decode and plot.
-
-    Parameters
-    ----------
-    auto_print : bool
-        If True (default), each call to log() prints immediately.
-        Set to False to accumulate lines and retrieve via flush().
+    Handles structured logging for Prosperity.
+    
+    If `auto_print` is True, logs are printed immediately to stdout, which
+    Prosperity captures in the `lambdaLog` field. If False, logs are buffered
+    and can be retrieved (and cleared) using `flush()`.
     """
 
-    PREFIX = 'LOGVIZ:'
+    LOGVIZ_PREFIX = 'LOGVIZ:'
+    LOGDBG_PREFIX = 'LOGDBG:'
 
     def __init__(self, auto_print: bool = True):
         self._auto_print = auto_print
         self._buffer: list[str] = []
 
-    # ── public API ────────────────────────────────────────────────────────────
-
-    def log(self, timestamp: int, **series: float) -> None:
+    def log(self, **series: float) -> None:
         """
-        Record one data point for each keyword argument.
-
-        Example
-        -------
-        logger.log(state.timestamp,
-                   spread=ask - bid,
-                   pos=position,
-                   pnl=current_pnl)
+        Records numeric data points for the given timestamp.
+        
+        Each keyword argument becomes a separate plot in the visualizer.
+        Non-numeric values are silently ignored.
+        
+        Args:
+            **series:  Key-value pairs of numeric data to plot.
         """
         if not series:
             return
-        # Convert everything to float; skip non-numeric silently
+        
         clean: dict[str, float] = {}
         for k, v in series.items():
             try:
                 clean[k] = float(v)
             except (TypeError, ValueError):
                 pass
+        
         if not clean:
             return
 
-        line = self.PREFIX + json.dumps(clean, separators=(',', ':'))
-        if self._auto_print:
-            print(line)
-        else:
-            self._buffer.append(line)
+        line = self.LOGVIZ_PREFIX + json.dumps(clean, separators=(',', ':'))
+        self._emit(line)
+
+    def debug(self, msg: str, tag: str = 'DBG', product: str = '') -> None:
+        """
+        Logs a text message visible in the "Logs" tab of the visualizer.
+        
+        Args:
+            msg:       The message text to display.
+            tag:       Severity tag: 'INFO' (cyan), 'WARN' (gold), 'ERR' (red), 'DBG' (dim).
+            product:   Optional product name (e.g. 'PEARLS'). If provided, the visualizer 
+                       will automatically show the position and PnL at that timestamp.
+        """
+        # Format: LOGDBG:tag:product:message
+        line = f"{self.LOGDBG_PREFIX}{tag}:{product}:{msg}"
+        self._emit(line)
 
     def flush(self) -> str:
-        """
-        Return all buffered lines joined by '\\n' and clear the buffer.
-        Use this as the third return value from your trader when
-        auto_print=False.
-        """
+        """Returns all buffered logs joined by newlines and clears the buffer."""
         out = '\n'.join(self._buffer)
         self._buffer.clear()
         return out
 
     def reset(self) -> None:
-        """Discard the buffer without returning it."""
+        """Clears the internal log buffer."""
         self._buffer.clear()
 
-
-# ─────────────────────────── usage example ───────────────────────────────────
-#
-#   from datamodel import TradingState, Order
-#   from logger import Logger
-#
-#   class Trader:
-#       def __init__(self):
-#           self.logger = Logger()          # auto_print=True by default
-#
-#       def run(self, state: TradingState):
-#           for product, ob in state.order_depths.items():
-#               if not ob.buy_orders or not ob.sell_orders:
-#                   continue
-#               best_bid = max(ob.buy_orders)
-#               best_ask = min(ob.sell_orders)
-#               mid = (best_bid + best_ask) / 2
-#               spread = best_ask - best_bid
-#               pos = state.position.get(product, 0)
-#
-#               # This line gets captured in lambdaLog and decoded by the viz
-#               self.logger.log(
-#                   state.timestamp,
-#                   **{f'{product}_spread': spread,
-#                      f'{product}_pos':    pos,
-#                      f'{product}_mid':    mid}
-#               )
-#
-#           orders = {}   # fill in your trading logic
-#           return orders, 0, ""
+    def _emit(self, line: str) -> None:
+        if self._auto_print:
+            print(line)
+        else:
+            self._buffer.append(line)
