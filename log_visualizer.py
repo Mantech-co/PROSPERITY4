@@ -6,10 +6,11 @@ import pyqtgraph as pg
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QComboBox, QLabel, QPushButton, QFileDialog, QTabWidget, QFrame, QMessageBox
+    QComboBox, QLabel, QPushButton, QFileDialog, QTabWidget, QFrame, QMessageBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QLineEdit
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QRectF, Qt
-from PyQt6.QtGui import QShortcut, QKeySequence, QFont
+from PyQt6.QtGui import QShortcut, QKeySequence, QFont, QColor, QBrush
 
 # --- Styling & Colors ---
 BG, PANEL_BG, BORDER, TEXT, DIM = '#0d0f14', '#12151c', '#1e2330', '#c8d0e0', '#4a5068'
@@ -60,6 +61,36 @@ QTabBar::tab:selected {{
     color: {ACCENT_CYAN}; 
     padding: 4px 15px; 
     font-size: 9pt;
+}}
+QTableWidget {{
+    background-color: {BG};
+    color: {TEXT};
+    gridline-color: {BORDER};
+    border: none;
+    font-family: 'JetBrains Mono', 'Consolas', monospace;
+    font-size: 8.5pt;
+}}
+QTableWidget::item {{
+    padding: 2px 6px;
+    border-bottom: 1px solid {BORDER};
+}}
+QTableWidget::item:selected {{
+    background-color: {BORDER};
+}}
+QHeaderView::section {{
+    background-color: {PANEL_BG};
+    color: {ACCENT_CYAN};
+    border: 1px solid {BORDER};
+    padding: 4px 8px;
+    font-weight: bold;
+    font-size: 8.5pt;
+}}
+QLineEdit {{
+    background: {PANEL_BG};
+    border: 1px solid {BORDER};
+    padding: 3px 8px;
+    border-radius: 3px;
+    color: {TEXT};
 }}
 """
 
@@ -135,6 +166,7 @@ class LogVisualizer(QMainWindow):
         self.setWindowTitle('Prosperity Sandbox Visualizer')
         self.setGeometry(50, 50, 1600, 920)
         self.data, self.current_df, self.ob_res = None, None, None
+        self.custom_curves = {}
         pg.setConfigOptions(useOpenGL=True, imageAxisOrder='row-major')
         self._build_ui()
         if log_path: self._load_file(log_path)
@@ -206,8 +238,45 @@ class LogVisualizer(QMainWindow):
         self.p_pnl = self.gw_p.addPlot(); self.p_pnl.showGrid(x=True, y=True, alpha=0.3)
         self.curve_pnl = self.p_pnl.plot(pen=pg.mkPen(ACCENT_GREEN, width=2))
 
+        self.gw_pos = pg.GraphicsLayoutWidget(); self.gw_pos.setBackground(BG)
+        self.tabs.addTab(self.gw_pos, "Position")
+        self.p_pos = self.gw_pos.addPlot(title="Position vs Timestamp")
+        self.p_pos.showGrid(x=True, y=True, alpha=0.3)
+        self.p_pos.addLegend()
+        self.p_pos.setLabel('left', 'Position'); self.p_pos.setLabel('bottom', 'Timestamp')
+        self.pos_curves = {}
+
         self.gw_c = pg.GraphicsLayoutWidget(); self.gw_c.setBackground(BG)
         self.tabs.addTab(self.gw_c, "Custom")
+
+        # Logs Tab (logcat-style)
+        logs_container = QWidget()
+        logs_layout = QVBoxLayout(logs_container)
+        logs_layout.setContentsMargins(0, 0, 0, 0)
+        logs_layout.setSpacing(0)
+        
+        # Filter bar
+        logs_filter_bar = QHBoxLayout()
+        logs_filter_bar.setContentsMargins(8, 6, 8, 6)
+        self.log_filter_input = QLineEdit()
+        self.log_filter_input.setPlaceholderText("Filter logs...")
+        self.log_filter_input.textChanged.connect(self._filter_logs_table)
+        logs_filter_bar.addWidget(QLabel("🔍"))
+        logs_filter_bar.addWidget(self.log_filter_input)
+        logs_layout.addLayout(logs_filter_bar)
+        
+        self.logs_table = QTableWidget()
+        self.logs_table.setColumnCount(6)
+        self.logs_table.setHorizontalHeaderLabels(['Timestamp', 'Tag', 'Product', 'Position', 'PnL', 'Message'])
+        self.logs_table.horizontalHeader().setStretchLastSection(True)
+        self.logs_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.logs_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.logs_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.logs_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.logs_table.verticalHeader().setVisible(False)
+        self.logs_table.setAlternatingRowColors(True)
+        logs_layout.addWidget(self.logs_table)
+        self.tabs.addTab(logs_container, "Logs")
 
         # Fixed Data Strip
         self.data_strip = QLabel("Ready")
@@ -275,7 +344,7 @@ class LogVisualizer(QMainWindow):
         for ts in all_ts:
             row = [str(int(ts))] + [str(ts_map[k].get(ts, '')) for k in custom]
             rows.append(','.join(row))
-        with open(path, 'w', newline='') as f:
+        with open(path, 'w', newline='', encoding='utf-8') as f:
             f.write('\n'.join(rows))
         QMessageBox.information(self, "Exported", f"Custom data saved to:\n{path}")
 
@@ -296,13 +365,125 @@ class LogVisualizer(QMainWindow):
                         for k, v in payload.items(): custom.setdefault(k, []).append((ts, float(v)))
                     except: pass
 
-        self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom}
+        # Parse debug messages: LOGDBG:timestamp:tag:product:message
+        debug_msgs = []
+        for entry in raw.get('logs', []):
+            entry_ts = entry.get('timestamp', 0)
+            log = entry.get('lambdaLog', '') or ''
+            for line in log.split('\n'):
+                if line.startswith('LOGDBG:'):
+                    rest = line[7:]
+                    # Format: LOGDBG:tag:product:message
+                    parts = rest.split(':', 2)
+                    ts = entry_ts
+                    if len(parts) == 3:
+                        tag, prod_ctx, msg = parts
+                    elif len(parts) == 2:
+                        tag, msg = parts
+                        prod_ctx = ''
+                    else:
+                        tag, msg, prod_ctx = 'DBG', rest, ''
+                    
+                    debug_msgs.append({
+                        'ts': ts, 
+                        'tag': tag.strip(), 
+                        'product': prod_ctx.strip(), 
+                        'msg': msg.strip()
+                    })
+
+        self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom, 'debug': debug_msgs}
         self.cb_prod.blockSignals(True)
         self.cb_prod.clear(); self.cb_prod.addItems(df['product'].unique().sort().to_list())
         self.cb_day.clear(); self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()])
         self.cb_prod.blockSignals(False)
         self._build_custom_plots()
+        self._build_position_plot()
+        self._build_logs_table()
         self._process_selection()
+
+    def _build_logs_table(self):
+        debug_msgs = self.data.get('debug', [])
+        df = self.data.get('prices_df')
+        trades = self.data.get('trades', [])
+
+        # Pre-compute cumulative position per product at each timestamp
+        pos_at = {}  # (product, timestamp) -> cumulative position
+        pos_state = {}
+        sorted_trades = sorted(
+            [t for t in trades if str(t.get('buyer', '')).upper() == 'SUBMISSION' or str(t.get('seller', '')).upper() == 'SUBMISSION'],
+            key=lambda t: t.get('timestamp', 0)
+        )
+        for tr in sorted_trades:
+            sym = tr.get('symbol', '')
+            is_buy = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+            delta = tr.get('quantity', 0) if is_buy else -tr.get('quantity', 0)
+            pos_state[sym] = pos_state.get(sym, 0) + delta
+            pos_at[(sym, tr['timestamp'])] = pos_state[sym]
+
+        # Build a lookup for PnL and mid per (product, timestamp)
+        pnl_mid = {}
+        if df is not None and len(df) > 0:
+            for row in df.iter_rows(named=True):
+                key = (row.get('product', ''), row.get('timestamp', 0))
+                pnl_mid[key] = (row.get('profit_and_loss', ''), row.get('mid_price', ''))
+
+        # Closest position at or before a given timestamp for a product
+        def get_position(prod, ts):
+            best_ts, best_pos = None, 0
+            for (s, t), p in pos_at.items():
+                if s == prod and t <= ts:
+                    if best_ts is None or t > best_ts:
+                        best_ts, best_pos = t, p
+            return best_pos
+
+        TAG_COLORS = {
+            'ERR': QColor('#ff3d5a'),
+            'WARN': QColor('#ffd700'),
+            'INFO': QColor('#00d4ff'),
+            'DBG': QColor('#4a5068'),
+        }
+
+        self.logs_table.setRowCount(len(debug_msgs))
+        self._logs_data = debug_msgs  # Keep for filtering
+
+        for i, entry in enumerate(debug_msgs):
+            ts = entry['ts']
+            tag = entry['tag'].upper()
+            prod = entry.get('product', '')
+            msg = entry['msg']
+
+            pnl_val, mid_val = '', ''
+            if prod and (prod, ts) in pnl_mid:
+                pnl_val, mid_val = pnl_mid[(prod, ts)]
+            pos_val = get_position(prod, ts) if prod else ''
+
+            row_color = TAG_COLORS.get(tag, QColor(TEXT))
+
+            items = [
+                str(ts),
+                tag,
+                prod,
+                str(pos_val) if pos_val != '' else '',
+                f'{pnl_val:.1f}' if isinstance(pnl_val, (int, float)) else str(pnl_val),
+                msg
+            ]
+            for col, text in enumerate(items):
+                item = QTableWidgetItem(text)
+                item.setForeground(QBrush(row_color))
+                self.logs_table.setItem(i, col, item)
+
+        self.logs_table.scrollToBottom()
+
+    def _filter_logs_table(self, text):
+        text = text.lower()
+        for row in range(self.logs_table.rowCount()):
+            match = False
+            for col in range(self.logs_table.columnCount()):
+                item = self.logs_table.item(row, col)
+                if item and text in item.text().lower():
+                    match = True
+                    break
+            self.logs_table.setRowHidden(row, not match)
 
     def _build_custom_plots(self):
         self.gw_c.clear()
@@ -313,6 +494,46 @@ class LogVisualizer(QMainWindow):
             if anchor: p.setXLink(anchor)
             else: anchor = p
             p.plot([x[0] for x in pts], [x[1] for x in pts], pen=pg.mkPen(CUSTOM_COLORS[i % len(CUSTOM_COLORS)], width=2))
+
+    def _build_position_plot(self):
+        # Clear old curves
+        for c in self.pos_curves.values():
+            self.p_pos.removeItem(c)
+        self.pos_curves.clear()
+
+        trades = self.data.get('trades', [])
+        if not trades:
+            return
+
+        # Group self-trades by symbol
+        pos_by_sym = {}  # symbol -> sorted list of (timestamp, delta)
+        for tr in trades:
+            is_buyer = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+            is_seller = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+            if not is_buyer and not is_seller:
+                continue
+            sym = tr.get('symbol', '')
+            qty = tr.get('quantity', 0)
+            ts = tr.get('timestamp', 0)
+            delta = qty if is_buyer else -qty
+            pos_by_sym.setdefault(sym, []).append((ts, delta))
+
+        products = sorted(pos_by_sym.keys())
+        colors = [ACCENT_CYAN, ACCENT_GREEN, ACCENT_RED, ACCENT_GOLD, ACCENT_PURPLE, ACCENT_WHITE] + CUSTOM_COLORS
+
+        for i, sym in enumerate(products):
+            events = sorted(pos_by_sym[sym], key=lambda x: x[0])
+            ts_list, pos_list = [], []
+            cum = 0
+            for ts, delta in events:
+                cum += delta
+                ts_list.append(ts)
+                pos_list.append(cum)
+            pen = pg.mkPen(colors[i % len(colors)], width=2)
+            curve = self.p_pos.plot(ts_list, pos_list, pen=pen, name=sym, stepMode='right')
+            self.pos_curves[sym] = curve
+
+        self.p_pos.autoRange()
 
     def _process_selection(self):
         if not self.data or not self.cb_prod.currentText(): return
@@ -338,8 +559,32 @@ class LogVisualizer(QMainWindow):
         if self.ob_res:
             self.img_item.setImage(self.ob_res['img'], autoLevels=False)
             self.img_item.setRect(QRectF(t[0], self.ob_res['levels'][0], t[-1]-t[0], self.ob_res['levels'][-1]-self.ob_res['levels'][0]))
-            self.img_item.setVisible(True)
+            self.img_item.setVisible(self.img_item.isVisible()) # Preserving current legend toggle state
         else: self.img_item.setVisible(False)
+
+        # Update Custom Overlays on Main Plot
+        custom_data = self.data.get('custom', {})
+        t_min, t_max = t[0], t[-1]
+        
+        for i, (name, pts) in enumerate(custom_data.items()):
+            if name not in self.custom_curves:
+                color = CUSTOM_COLORS[i % len(CUSTOM_COLORS)]
+                curve = self.p_m.plot(pen=pg.mkPen(color, width=1.5), name=f"[C] {name}")
+                curve.setVisible(False) # Default disabled
+                self.custom_curves[name] = curve
+                self.leg_m.addItem(curve, f"[C] {name}")
+                # Sync legend label color with hidden state
+                label = self.leg_m.items[-1][1]
+                label.setAttr('color', DIM)
+            
+            curve = self.custom_curves[name]
+            # Filter custom points to fit the current time range
+            pts_filtered = [p for p in pts if t_min <= p[0] <= t_max]
+            if pts_filtered:
+                curve.setData([p[0] for p in pts_filtered], [p[1] for p in pts_filtered])
+            else:
+                curve.setData([], [])
+
         self.p_m.autoRange(); self.p_pnl.autoRange()
 
 def _auto_detect_log(script_dir: str):
