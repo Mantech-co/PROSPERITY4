@@ -23,9 +23,9 @@ class Trader:
         # HYPERPARAMETERS (Submission Mode - Uncomment for final submission)
         # ---------------------------------------------------------
         self.ma_window = 6
-        self.thresh_a = 0.108
-        self.thresh_b = 0.145
-        self.thresh_c = 15.0
+        self.thresh_a = 0.12
+        self.thresh_b = 0.195
+        self.thresh_c = 13.0
 
     def calculate_thresholds(self, position: int, limit: int) -> tuple[float, float]:
         """Calculates dynamic threshold percentages based on inventory."""
