@@ -1,0 +1,7 @@
+{
+    "alpha": 0.5,
+    "n_sma": 20,
+    "m_slope": 30,
+    "slope_threshold": 0.2,
+    "position_limit": 80
+}
