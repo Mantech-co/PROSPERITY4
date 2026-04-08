@@ -270,10 +270,15 @@ class HeatmapLegend(QWidget):
 # --- Data Engine ---
 def build_ob_heatmap(p_df: pl.DataFrame, product: str, day):
     flt = p_df.filter(pl.col('product') == product)
+    min_day = p_df['day'].min() if 'day' in p_df.columns else 0
     if day != 'All': flt = flt.filter(pl.col('day') == int(day))
     flt = flt.sort(['day', 'timestamp'])
     
-    times = flt['timestamp'].to_numpy()
+    # Use relative day offset (plot_time) for multi-day views
+    if day == 'All' and 'day' in flt.columns:
+        times = (flt['timestamp'] + (flt['day'] - min_day) * 1_000_000).to_numpy()
+    else:
+        times = flt['timestamp'].to_numpy()
     bid_p_cols = sorted([c for c in flt.columns if 'bid_price_' in c], key=lambda x: int(x.split('_')[-1]))
     ask_p_cols = sorted([c for c in flt.columns if 'ask_price_' in c], key=lambda x: int(x.split('_')[-1]))
 
@@ -905,9 +910,10 @@ class LogVisualizer(QMainWindow):
         has_day = 'day' in self.current_df.columns
         self.current_df = self.current_df.sort(['day', 'timestamp'] if has_day else ['timestamp'])
         
+        min_day = self.data['prices_df']['day'].min() if 'day' in self.data['prices_df'].columns else 0
         t = self.current_df['timestamp'].to_numpy()
         if day == 'All' and has_day:
-            t = t + self.current_df['day'].to_numpy() * 1000000
+            t = t + (self.current_df['day'].to_numpy() - min_day) * 1000000
 
         mid = self.current_df['mid_price'].to_numpy()
         self.curve_mid.setData(t, mid)
@@ -925,7 +931,7 @@ class LogVisualizer(QMainWindow):
                 for tr in self.data['trades']:
                     if tr.get('symbol') == prod:
                         tr_c = tr.copy()
-                        if 'day' in tr_c: tr_c['timestamp'] += tr_c['day'] * 1000000
+                        if 'day' in tr_c: tr_c['timestamp'] += (tr_c['day'] - min_day) * 1000000
                         prod_trades.append(tr_c)
                 prod_trades.sort(key=lambda x: x['timestamp'])
             realized, cash, pos, avg_cost = 0.0, 0.0, 0, 0.0
@@ -974,7 +980,7 @@ class LogVisualizer(QMainWindow):
             
             ts = tr.get('timestamp', 0)
             if day == 'All' and 'day' in tr:
-                ts += tr['day'] * 1000000
+                ts += (tr['day'] - min_day) * 1000000
 
             is_buy = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
             is_sell = str(tr.get('seller', '')).upper() == 'SUBMISSION'
@@ -1017,7 +1023,10 @@ class LogVisualizer(QMainWindow):
         ob_max_vol = self.ob_res['max_vol'] if self.ob_res else 1.0
         if self.ob_res:
             self.img_item.setImage(self.ob_res['img'], autoLevels=False)
-            self.img_item.setRect(QRectF(t[0], self.ob_res['levels'][0], t[-1]-t[0], self.ob_res['levels'][-1]-self.ob_res['levels'][0]))
+            x_min, x_max = t[0], t[-1]
+            y_min, y_max = self.ob_res['levels'][0], self.ob_res['levels'][-1]
+            x_step = (t[1] - t[0]) if len(t) > 1 else 100
+            self.img_item.setRect(QRectF(x_min - 0.5 * x_step, y_min - 0.5, (len(t)) * x_step, y_max - y_min + 1))
             self.img_item.setVisible(self.img_item.isVisible())
         else:
             self.img_item.setVisible(False)
@@ -1111,7 +1120,8 @@ class LogVisualizer(QMainWindow):
 
         if day == 'All' and 'day' in df.columns:
             t_col = 'continuous_ts'
-            df = df.with_columns((pl.col('timestamp') + pl.col('day') * 1000000).alias(t_col))
+            min_day = self.data['prices_df']['day'].min() if 'day' in self.data['prices_df'].columns else 0
+            df = df.with_columns((pl.col('timestamp') + (pl.col('day') - min_day) * 1000000).alias(t_col))
         else:
             t_col = 'timestamp'
 

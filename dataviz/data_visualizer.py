@@ -99,13 +99,14 @@ class DataProcessor(QThread):
         else:
             t_filtered = pl.DataFrame() # Empty fallback
 
+        # Standardize X-axis: Always relative to min_day in the full dataset
+        min_day = self.prices_df[self.pc('day')].min() if 'day' in self.prices_df.columns else 0
+        DAY_LENGTH = 1_000_000
+
         if self.day_val == "All":
             p_filtered = p_filtered.sort([self.pc('day'), self.pc('timestamp')])
             if len(t_filtered) > 0:
                 t_filtered = t_filtered.sort([self.tc('day'), self.tc('timestamp')])
-
-            DAY_LENGTH = 1_000_000
-            min_day = p_filtered[self.pc('day')].min()
 
             p_filtered = p_filtered.with_columns(
                 (pl.col(self.pc('timestamp')) + (pl.col(self.pc('day')) - min_day) * DAY_LENGTH).alias("plot_time")
@@ -117,11 +118,16 @@ class DataProcessor(QThread):
                 )
         else:
             p_filtered = p_filtered.filter(pl.col(self.pc('day')) == self.day_val).sort(self.pc('timestamp'))
-            p_filtered = p_filtered.with_columns(pl.col(self.pc('timestamp')).alias("plot_time"))
+            # Still use the global min_day offset to keep day-relative coordinates consistent
+            p_filtered = p_filtered.with_columns(
+                (pl.col(self.pc('timestamp')) + (pl.col(self.pc('day')) - min_day) * DAY_LENGTH).alias("plot_time")
+            )
             
             if len(t_filtered) > 0:
                 t_filtered = t_filtered.filter(pl.col(self.tc('day')) == self.day_val).sort(self.tc('timestamp'))
-                t_filtered = t_filtered.with_columns(pl.col(self.tc('timestamp')).alias("plot_time"))
+                t_filtered = t_filtered.with_columns(
+                    (pl.col(self.tc('timestamp')) + (pl.col(self.tc('day')) - min_day) * DAY_LENGTH).alias("plot_time")
+                )
 
         bid_vol = p_filtered[self.pc('bid_volume_1')].to_numpy()
         ask_vol = p_filtered[self.pc('ask_volume_1')].to_numpy()
@@ -746,7 +752,7 @@ class ProsperityVisualizer(QMainWindow):
             p_dfs.append(pl.read_csv(filepath, separator=";"))
         self.prices_df = pl.concat(p_dfs) if p_dfs else None
 
-        # Load Trades and safely inject the "day" column
+        # Load Trades and safely inject the "day" column (Separated by comma)
         t_dfs = []
         for f in files['trades']:
             filepath = os.path.join(self.data_dir, f)

@@ -269,8 +269,8 @@ class Trader:
                 else:
                     continue
 
-                bid_wall = max(bid_orders, key=lambda x: x[0])[0]
-                ask_wall = min(ask_orders, key=lambda x: x[0])[0]
+                bid_wall   = max(bid_orders, key=lambda x: x[0])[0]
+                ask_wall   = min(ask_orders, key=lambda x: x[0])[0]
                 market_mid = (bid_wall + ask_wall) / 2.0
 
                 if tomatoes_ema is None:
