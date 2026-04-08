@@ -1,0 +1,9 @@
+Refactor code for modularity of strategies
+
+Mix Log viz and data viz
+
+Linear combination of data, or just a quick way to plot anything, in post process
+
+Current tomatoes strategy placed orders based on market making, with a skewed order placement based on avellanada stoikov model
+
+- option to tag trades by strategy, for bifurication in debugging

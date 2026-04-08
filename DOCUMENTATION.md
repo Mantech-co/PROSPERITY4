@@ -91,9 +91,18 @@ An interactive tool for exploring and debugging backtest session logs.
 ```bash
 python logviz/log_visualizer.py
 ```
-*   **Functionality**: Parses `activitiesLog`, `traderLog`, and `sandboxLog` sections separately.
-*   **PnL Graph**: Visualizes PnL growth over time for each product.
-*   **Debug Logs**: Integrated viewer for your strategy's `Logger.log()` output.
+*   **Dashboard View**: A high-level overview showing key performance metrics:
+    *   **Sharpe Ratio**: Reward-to-risk ratio of strategy performance.
+    *   **Win Rate**: Percentage of profitable position closures.
+    *   **Total Volume**: Aggregate quantity traded.
+    *   **Trade Counts**: Separation of "My Trades" vs "Bot Trades" on the platform.
+*   **Performance Plots**:
+    *   **Cumulative PnL**: View total profit growth over time.
+    *   **Drawdown (Absolute/%)**: Track drawdown from high-water marks with a toggle for percentage view.
+*   **Filtering**: Analyze "Overall" session performance or drill down into individual products.
+*   **Market View**: Interactive heatmap and price plot with trade markers.
+*   **Debug Logs**: Integrated viewer for your strategy's `LOGDBG:` output with product context.
+*   **Data Import**: Use the "Import Data" button to automatically load and visualize all raw market data CSVs directly from the `dataviz/` directory.
 
 ---
 
@@ -118,13 +127,15 @@ A simple JSON file used by the Tuning Suite to inject parameters during sweeps.
 
 ---
 
-## Directory Summary (Non-Data Files)
+## 5. Required Directory Structure
 
-| Directory | Purpose | Key Tool |
+To ensure all tools, visualizers, and tuners work harmoniously, your repository should be structured as follows. **Pay special attention to data folders**, as the tooling assumes specific locations for your files.
+
+| Directory / File | Purpose | Notes |
 | :--- | :--- | :--- |
-| `prosperity4bt/` | Core Backtester | `back_tester.py` |
-| `tuning/` | Optimization Suite | `hyper_parameter_tester.py` |
-| `dataviz/` | Market Data GUI | `data_visualizer.py` |
-| `logviz/` | Log Analysis GUI | `log_visualizer.py` |
-| `strategy/` | Trading Logic | `main.py` |
-| `backtests/` | Output Storage | - |
+| `dataviz/` | Market Data visualization & **Raw Data Storage** | **🛑 IMPORTANT**: Store your raw platform data CSVs (`prices_*.csv`, `trades_*.csv`) here. Both `data_visualizer.py` and the `log_visualizer.py` "Import Data" feature automatically read from this directory. |
+| `logviz/` | Log Analysis GUI | Launch `log_visualizer.py` to analyze logs or import raw dataviz data. |
+| `backtests/` | Session Output & Tuning Log Storage | Tuning sweeps automatically save logs to `backtests/tuning_runs/`. |
+| `prosperity4bt/`| Core Backtester framework | Contains algorithmic matching logic. |
+| `tuning/` | Hyperparameter Optimization Suite | Scripts like `hyper_parameter_tester.py` and `pnl_extractor.py`. |
+| `strategy/` | Your Trading Logic | Contains the `Trader` class in `main.py` & hyperparameter states in `params.json`. |

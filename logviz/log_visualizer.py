@@ -7,7 +7,8 @@ import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QLabel, QPushButton, QFileDialog, QTabWidget, QFrame, QMessageBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QLineEdit
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QLineEdit,
+    QScrollArea, QCheckBox
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QRectF, Qt
 from PyQt6.QtGui import QShortcut, QKeySequence, QFont, QColor, QBrush
@@ -287,10 +288,13 @@ def build_ob_heatmap(p_df: pl.DataFrame, product: str, day):
             all_p.append(pa[valid]); all_v.append(va[valid])
 
     if not all_p: return None
-    price_levels = np.unique(np.concatenate(all_p))
+    concat_p = np.concatenate(all_p)
+    if len(concat_p) == 0: return None
+    price_levels = np.unique(concat_p)
     max_vol = max(np.max(np.concatenate(all_v)), 1.0)
     
     w, h = len(times), len(price_levels)
+    
     raw_vol = np.zeros((h, w), dtype=float)
     
     # Store levels (0-9) instead of raw intensity
@@ -353,6 +357,10 @@ class LogVisualizer(QMainWindow):
         btn_open = QPushButton("📂 Open Log"); btn_open.clicked.connect(self._open_dialog)
         controls.addWidget(btn_open)
         
+        btn_import = QPushButton("📊 Import Data")
+        btn_import.clicked.connect(self._import_dataviz_data)
+        controls.addWidget(btn_import)
+        
         controls.addWidget(QLabel("Product:"))
         self.cb_prod = QComboBox(); controls.addWidget(self.cb_prod)
         
@@ -375,6 +383,9 @@ class LogVisualizer(QMainWindow):
 
         # Tabs
         self.tabs = QTabWidget(); main_layout.addWidget(self.tabs)
+        
+        # Build Dashboard Tab
+        self._build_dashboard_tab()
         
         # Market View
         market_container = QWidget()
@@ -486,6 +497,96 @@ class LogVisualizer(QMainWindow):
         QShortcut(QKeySequence("Y"), self).activated.connect(lambda: self._set_zoom("y"))
         QShortcut(QKeySequence("Z"), self).activated.connect(lambda: self._set_zoom("xy"))
 
+    def _build_dashboard_tab(self):
+        dash_container = QWidget()
+        dash_layout = QVBoxLayout(dash_container)
+        dash_layout.setContentsMargins(12, 12, 12, 12)
+        dash_layout.setSpacing(12)
+
+        # Filters
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Dashboard Product:"))
+        self.cb_dash_prod = QComboBox()
+        self.cb_dash_prod.currentTextChanged.connect(self._update_dashboard)
+        filter_layout.addWidget(self.cb_dash_prod)
+        filter_layout.addStretch()
+        dash_layout.addLayout(filter_layout)
+
+        # Scroll Area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setStyleSheet(f"background-color: {BG};")
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(15)
+
+        # Metrics Panel
+        metrics_frame = QFrame()
+        metrics_frame.setStyleSheet(f"background-color: {PANEL_BG}; border: 1px solid {BORDER}; border-radius: 4px;")
+        metrics_layout = QVBoxLayout(metrics_frame)
+        metrics_layout.setContentsMargins(15, 15, 15, 15)
+        metrics_layout.setSpacing(10)
+        
+        self.lbl_sharpe = QLabel("Sharpe Ratio: --")
+        self.lbl_sharpe.setStyleSheet(f"color: {ACCENT_CYAN}; font-weight: bold; font-size: 11pt;")
+        self.lbl_winrate = QLabel("Win Rate: --")
+        self.lbl_volume = QLabel("Total Volume Traded: --")
+        self.lbl_my_trades = QLabel("My Trades: --")
+        self.lbl_bot_trades = QLabel("Bot Trades: --")
+        
+        metrics_layout.addWidget(self.lbl_sharpe)
+        
+        h_metrics = QHBoxLayout()
+        h_metrics.addWidget(self.lbl_winrate)
+        h_metrics.addWidget(self.lbl_volume)
+        h_metrics.addWidget(self.lbl_my_trades)
+        h_metrics.addWidget(self.lbl_bot_trades)
+        h_metrics.addStretch()
+        metrics_layout.addLayout(h_metrics)
+        
+        scroll_layout.addWidget(metrics_frame)
+
+        # Plots
+        self.gw_dash_pnl = pg.GraphicsLayoutWidget()
+        self.gw_dash_pnl.setBackground(BG)
+        self.gw_dash_pnl.setFixedHeight(300)
+        self.p_dash_pnl = self.gw_dash_pnl.addPlot(title="Cumulative PnL")
+        self.p_dash_pnl.showGrid(x=True, y=True, alpha=0.3)
+        self.curve_dash_pnl = self.p_dash_pnl.plot(pen=pg.mkPen(ACCENT_GREEN, width=2))
+        scroll_layout.addWidget(self.gw_dash_pnl)
+
+        # Drawdown 
+        dd_container = QWidget()
+        dd_layout = QVBoxLayout(dd_container)
+        dd_layout.setContentsMargins(0, 0, 0, 0)
+        dd_ctrl = QHBoxLayout()
+        self.chk_dd_pct = QCheckBox("Show Percentage %")
+        self.chk_dd_pct.stateChanged.connect(self._update_dashboard)
+        dd_ctrl.addWidget(self.chk_dd_pct)
+        dd_ctrl.addStretch()
+        dd_layout.addLayout(dd_ctrl)
+
+        self.gw_dash_dd = pg.GraphicsLayoutWidget()
+        self.gw_dash_dd.setBackground(BG)
+        self.gw_dash_dd.setFixedHeight(300)
+        self.p_dash_dd = self.gw_dash_dd.addPlot(title="Drawdown")
+        self.p_dash_dd.showGrid(x=True, y=True, alpha=0.3)
+        self.p_dash_dd.setXLink(self.p_dash_pnl)
+        self.curve_dash_dd = self.p_dash_dd.plot(pen=pg.mkPen(ACCENT_RED, width=2, fillLevel=0, brush=(255, 61, 90, 50)))
+        dd_layout.addWidget(self.gw_dash_dd)
+        
+        scroll_layout.addWidget(dd_container)
+        scroll_layout.addStretch()
+
+        scroll_area.setWidget(scroll_content)
+        dash_layout.addWidget(scroll_area)
+
+        self.tabs.insertTab(0, dash_container, "Dashboard")
+        self.tabs.setCurrentIndex(0)
+
     def _on_mouse_moved(self, pos):
         if not self.p_m.sceneBoundingRect().contains(pos) or self.current_df is None: return
         mouse_point = self.p_m.vb.mapSceneToView(pos)
@@ -546,6 +647,56 @@ class LogVisualizer(QMainWindow):
             f.write('\n'.join(rows))
         QMessageBox.information(self, "Exported", f"Custom data saved to:\n{path}")
 
+    def _import_dataviz_data(self):
+        dataviz_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dataviz")
+        if not os.path.exists(dataviz_dir):
+            QMessageBox.warning(self, "Error", f"Dataviz directory not found at: {dataviz_dir}")
+            return
+            
+        p_dfs = []
+        t_dicts = []
+        
+        for f in os.listdir(dataviz_dir):
+            if not f.endswith('.csv'): continue
+            filepath = os.path.join(dataviz_dir, f)
+            if f.startswith("prices_"):
+                p_dfs.append(pl.read_csv(filepath, separator=";", null_values=['', 'nan']))
+            elif f.startswith("trades_"):
+                day_match = re.search(r"day_(-?\d+)", f)
+                df = pl.read_csv(filepath, separator=";", null_values=['', 'nan'])
+                if day_match:
+                    day_val = int(day_match.group(1))
+                    df = df.with_columns(pl.lit(day_val).alias("day"))
+                t_dicts.extend(df.to_dicts())
+                
+        if not p_dfs:
+            QMessageBox.warning(self, "Error", "No price CSVs found in dataviz.")
+            return
+            
+        df = pl.concat(p_dfs)
+        self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': []}
+        
+        self.cb_prod.blockSignals(True)
+        products = df['product'].unique().sort().to_list()
+        self.cb_prod.clear()
+        self.cb_prod.addItems(products)
+        self.cb_day.clear()
+        self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()])
+        self.cb_prod.blockSignals(False)
+        
+        if hasattr(self, 'cb_dash_prod'):
+            self.cb_dash_prod.blockSignals(True)
+            self.cb_dash_prod.clear()
+            self.cb_dash_prod.addItems(['Overall'] + products)
+            self.cb_dash_prod.blockSignals(False)
+            
+        self._build_custom_plots()
+        self._build_position_plot()
+        self._build_logs_table()
+        self._process_selection()
+        if hasattr(self, 'cb_dash_prod'):
+            self._update_dashboard()
+
     def _load_file(self, path):
         with open(path, encoding='utf-8') as f:
             raw = json.load(f)
@@ -591,13 +742,23 @@ class LogVisualizer(QMainWindow):
 
         self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom, 'debug': debug_msgs}
         self.cb_prod.blockSignals(True)
-        self.cb_prod.clear(); self.cb_prod.addItems(df['product'].unique().sort().to_list())
+        products = df['product'].unique().sort().to_list()
+        self.cb_prod.clear(); self.cb_prod.addItems(products)
         self.cb_day.clear(); self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()])
         self.cb_prod.blockSignals(False)
+        
+        if hasattr(self, 'cb_dash_prod'):
+            self.cb_dash_prod.blockSignals(True)
+            self.cb_dash_prod.clear()
+            self.cb_dash_prod.addItems(['Overall'] + products)
+            self.cb_dash_prod.blockSignals(False)
+            
         self._build_custom_plots()
         self._build_position_plot()
         self._build_logs_table()
         self._process_selection()
+        if hasattr(self, 'cb_dash_prod'):
+            self._update_dashboard()
 
     def _build_logs_table(self):
         debug_msgs = self.data.get('debug', [])
@@ -749,7 +910,10 @@ class LogVisualizer(QMainWindow):
             pnl_data = self.current_df['profit_and_loss'].to_numpy() if 'profit_and_loss' in self.current_df.columns else np.zeros(len(t))
         else:
             # Calculate from trades
-            prod_trades = sorted([tr for tr in self.data['trades'] if tr.get('symbol') == prod], key=lambda x: x['timestamp'])
+            if day != 'All':
+                prod_trades = sorted([tr for tr in self.data['trades'] if tr.get('symbol') == prod and tr.get('day', int(day)) == int(day)], key=lambda x: x['timestamp'])
+            else:
+                prod_trades = sorted([tr for tr in self.data['trades'] if tr.get('symbol') == prod], key=lambda x: x['timestamp'])
             realized, cash, pos, avg_cost = 0.0, 0.0, 0, 0.0
             pnl_array = []
             trade_idx = 0
@@ -789,15 +953,19 @@ class LogVisualizer(QMainWindow):
 
         mb_t, mb_p, ms_t, ms_p = [], [], [], []
         b_t, b_p, b_brushes, b_sizes = [], [], [], []
-        
-        # --- Collect bot trades first (need volumes for quantile edges) ---
         bot_raw = []  # (ts, price, vol)
         for tr in self.data['trades']:
             if tr.get('symbol') != prod: continue
-            if tr.get('buyer') != 'SUBMISSION' and tr.get('seller') != 'SUBMISSION':
+            if day != 'All' and tr.get('day', int(day)) != int(day): continue
+            is_buy = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+            is_sell = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+            if is_buy:
+                mb_t.append(tr['timestamp']); mb_p.append(tr['price'])
+            elif is_sell:
+                ms_t.append(tr['timestamp']); ms_p.append(tr['price'])
+            else:
                 bot_raw.append((tr['timestamp'], tr['price'], int(tr.get('quantity', 1))))
 
-        # Build quantile-based bucket edges (up to 20 buckets)
         if bot_raw:
             vols = np.array([v for _, _, v in bot_raw])
             unique_vols = np.unique(vols)
@@ -805,10 +973,8 @@ class LogVisualizer(QMainWindow):
             if n_buckets <= 1:
                 quantile_edges = np.array([unique_vols[0] - 0.5, unique_vols[-1] + 0.5])
             else:
-                # Use percentile edges so each bucket has roughly equal trade count
                 pcts = np.linspace(0, 100, n_buckets + 1)
                 quantile_edges = np.unique(np.percentile(vols, pcts))
-                # If percentiles collapsed (all same value), fall back to range split
                 if len(quantile_edges) < 2:
                     quantile_edges = np.linspace(vols.min(), vols.max() + 1, n_buckets + 1)
             n_buckets = len(quantile_edges) - 1
@@ -816,15 +982,13 @@ class LogVisualizer(QMainWindow):
             quantile_edges = np.array([0, 1])
             n_buckets = 1
 
-        # --- Assign colors using quantile bucket membership ---
         for ts, pr, vol in bot_raw:
             b_t.append(ts); b_p.append(pr)
-            # np.searchsorted: which bucket does this volume fall in?
             bucket = min(np.searchsorted(quantile_edges[1:], vol, side='right'), n_buckets - 1)
             pal_idx = int(round(bucket * (len(TRADE_VOLUME_COLORS) - 1) / max(n_buckets - 1, 1)))
             c = TRADE_VOLUME_COLORS[pal_idx]
             b_brushes.append(pg.mkBrush(c))
-            b_sizes.append(6 + bucket * (14 / max(n_buckets - 1, 1)))  # scale 6→20
+            b_sizes.append(6 + bucket * (14 / max(n_buckets - 1, 1)))
 
         self.sc_buy.setData(x=mb_t, y=mb_p)
         self.sc_sell.setData(x=ms_t, y=ms_p)
@@ -840,31 +1004,143 @@ class LogVisualizer(QMainWindow):
             self.img_item.setVisible(False)
         self.hm_legend.update_ranges(ob_max_vol, quantile_edges)
 
-
-        # Update Custom Overlays on Main Plot
         custom_data = self.data.get('custom', {})
-        t_min, t_max = t[0], t[-1]
-        
-        for i, (name, pts) in enumerate(custom_data.items()):
-            if name not in self.custom_curves:
-                color = CUSTOM_COLORS[i % len(CUSTOM_COLORS)]
-                curve = self.p_m.plot(pen=pg.mkPen(color, width=1.5), name=f"[C] {name}")
-                curve.setVisible(False) # Default disabled
-                self.custom_curves[name] = curve
-                self.leg_m.addItem(curve, f"[C] {name}")
-                # Sync legend label color with hidden state
-                label = self.leg_m.items[-1][1]
-                label.setAttr('color', DIM)
-            
-            curve = self.custom_curves[name]
-            # Filter custom points to fit the current time range
-            pts_filtered = [p for p in pts if t_min <= p[0] <= t_max]
-            if pts_filtered:
-                curve.setData([p[0] for p in pts_filtered], [p[1] for p in pts_filtered])
-            else:
-                curve.setData([], [])
+        if len(t) > 0:
+            t_min, t_max = t[0], t[-1]
+            for i, (name, pts) in enumerate(custom_data.items()):
+                if name not in self.custom_curves:
+                    color = CUSTOM_COLORS[i % len(CUSTOM_COLORS)]
+                    curve = self.p_m.plot(pen=pg.mkPen(color, width=1.5), name=f"[C] {name}")
+                    curve.setVisible(False)
+                    self.custom_curves[name] = curve
+                    self.leg_m.addItem(curve, f"[C] {name}")
+                    label = self.leg_m.items[-1][1]
+                    label.setAttr('color', DIM)
+                
+                curve = self.custom_curves[name]
+                pts_filtered = [p for p in pts if t_min <= p[0] <= t_max]
+                if pts_filtered:
+                    curve.setData([p[0] for p in pts_filtered], [p[1] for p in pts_filtered])
+                else:
+                    curve.setData([], [])
 
-        self.p_m.autoRange(); self.p_pnl.autoRange()
+        self.p_m.autoRange()
+        self.p_pnl.autoRange()
+
+    def _update_dashboard(self):
+        if not self.data or not hasattr(self, 'cb_dash_prod'): return
+        prod = self.cb_dash_prod.currentText()
+        day = self.cb_day.currentText()
+        df = self.data['prices_df']
+        if prod != 'Overall':
+            df = df.filter(pl.col('product') == prod)
+        
+        trades = self.data.get('trades', [])
+        my_trades_cnt = 0
+        bot_trades_cnt = 0
+        volume_traded = 0
+        realized_pnl_trades = []
+        
+        if prod != 'Overall':
+            prod_trades = [tr for tr in trades if tr.get('symbol') == prod and (day == 'All' or tr.get('day', int(day)) == int(day))]
+        else:
+            prod_trades = [tr for tr in trades if (day == 'All' or tr.get('day', int(day)) == int(day))]
+
+        pos_map = {}
+        cost_map = {}
+
+        for tr in sorted(prod_trades, key=lambda x: x.get('timestamp', 0)):
+            is_buyer = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+            is_seller = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+            qty = int(tr.get('quantity', 0))
+            price = float(tr.get('price', 0))
+            sym = tr.get('symbol', 'unknown')
+
+            if not is_buyer and not is_seller:
+                bot_trades_cnt += 1
+                continue
+
+            my_trades_cnt += 1
+            volume_traded += qty
+            
+            p_pos = pos_map.get(sym, 0)
+            p_cost = cost_map.get(sym, 0.0)
+
+            if is_buyer:
+                if p_pos >= 0:
+                    cost_map[sym] = (p_cost * p_pos + price * qty) / (p_pos + qty)
+                else:
+                    closing = min(qty, abs(p_pos))
+                    realized = closing * (p_cost - price)
+                    realized_pnl_trades.append(realized)
+                    if qty > abs(p_pos):
+                        cost_map[sym] = price
+                pos_map[sym] = p_pos + qty
+            else:
+                if p_pos <= 0:
+                    cost_map[sym] = (p_cost * abs(p_pos) + price * qty) / (abs(p_pos) + qty)
+                else:
+                    closing = min(qty, p_pos)
+                    realized = closing * (price - p_cost)
+                    realized_pnl_trades.append(realized)
+                    if qty > p_pos:
+                        cost_map[sym] = price
+                pos_map[sym] = p_pos - qty
+
+        winning_trades = sum(1 for r in realized_pnl_trades if r > 0)
+        win_rate = (winning_trades / len(realized_pnl_trades) * 100) if realized_pnl_trades else 0.0
+
+        df = df.sort('timestamp')
+        
+        if len(df) > 0:
+            agg_df = df.group_by('timestamp').agg(pl.col('profit_and_loss').sum().alias('pnl'))
+            agg_df = agg_df.sort('timestamp')
+            t = agg_df['timestamp'].to_numpy()
+            pnl_arr = agg_df['pnl'].to_numpy()
+        else:
+            t = np.array([])
+            pnl_arr = np.array([])
+
+        if len(pnl_arr) > 1:
+            pnl_deltas = np.diff(pnl_arr)
+            mean_delta = np.mean(pnl_deltas)
+            std_delta = np.std(pnl_deltas)
+            # Use 1000 multiplier to roughly normalize the typical small tick movements
+            sharpe = (mean_delta / std_delta * 1000) if std_delta > 0 else 0
+        else:
+            sharpe = 0.0
+
+        if len(pnl_arr) > 0:
+            peak = np.maximum.accumulate(pnl_arr)
+            dd_abs = peak - pnl_arr
+            dd_pct = np.zeros_like(dd_abs)
+            valid = peak > 0
+            dd_pct[valid] = (dd_abs[valid] / peak[valid]) * 100.0
+            
+            show_pct = self.chk_dd_pct.isChecked()
+            dd_arr = dd_pct if show_pct else dd_abs
+            max_dd = np.max(dd_arr)
+        else:
+            dd_arr = np.array([])
+            max_dd = 0.0
+            show_pct = False
+
+        self.lbl_sharpe.setText(f"Sharpe Ratio: {sharpe:,.3f}")
+        self.lbl_winrate.setText(f"Win Rate: {win_rate:,.1f}% ({winning_trades}/{len(realized_pnl_trades)})")
+        self.lbl_volume.setText(f"Total Volume Traded: {volume_traded:,}")
+        self.lbl_my_trades.setText(f"My Trades: {my_trades_cnt:,}")
+        self.lbl_bot_trades.setText(f"Bot Trades: {bot_trades_cnt:,}")
+
+        self.curve_dash_pnl.setData(t, pnl_arr)
+        self.curve_dash_dd.setData(t, dd_arr)
+
+        if show_pct:
+            self.p_dash_dd.setLabel('left', 'Drawdown (%)')
+        else:
+            self.p_dash_dd.setLabel('left', 'Drawdown (Shells)')
+
+        self.p_dash_pnl.autoRange()
+        self.p_dash_dd.autoRange()
 
 def _auto_detect_log(script_dir: str):
     """Return path if exactly one .log file exists next to the script, else None."""
