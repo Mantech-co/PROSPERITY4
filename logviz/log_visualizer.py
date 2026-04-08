@@ -868,12 +868,14 @@ class LogVisualizer(QMainWindow):
         pos_by_sym = {}  # symbol -> sorted list of (timestamp, delta)
         for tr in trades:
             is_buyer = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
-            is_seller = str(tr.get('seller', '')).upper() == 'SUBMISSION'
-            if not is_buyer and not is_seller:
+            is_sell = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+            if not is_buyer and not is_sell:
                 continue
             sym = tr.get('symbol', '')
             qty = tr.get('quantity', 0)
             ts = tr.get('timestamp', 0)
+            if 'day' in tr:
+                ts += tr['day'] * 1000000
             delta = qty if is_buyer else -qty
             pos_by_sym.setdefault(sym, []).append((ts, delta))
 
@@ -899,9 +901,15 @@ class LogVisualizer(QMainWindow):
         prod, day = self.cb_prod.currentText(), self.cb_day.currentText()
         self.current_df = self.data['prices_df'].filter(pl.col('product') == prod)
         if day != 'All': self.current_df = self.current_df.filter(pl.col('day') == int(day))
-        self.current_df = self.current_df.sort('timestamp')
         
-        t, mid = self.current_df['timestamp'].to_numpy(), self.current_df['mid_price'].to_numpy()
+        has_day = 'day' in self.current_df.columns
+        self.current_df = self.current_df.sort(['day', 'timestamp'] if has_day else ['timestamp'])
+        
+        t = self.current_df['timestamp'].to_numpy()
+        if day == 'All' and has_day:
+            t = t + self.current_df['day'].to_numpy() * 1000000
+
+        mid = self.current_df['mid_price'].to_numpy()
         self.curve_mid.setData(t, mid)
         
         # PnL Calculation
@@ -913,7 +921,13 @@ class LogVisualizer(QMainWindow):
             if day != 'All':
                 prod_trades = sorted([tr for tr in self.data['trades'] if tr.get('symbol') == prod and tr.get('day', int(day)) == int(day)], key=lambda x: x['timestamp'])
             else:
-                prod_trades = sorted([tr for tr in self.data['trades'] if tr.get('symbol') == prod], key=lambda x: x['timestamp'])
+                prod_trades = []
+                for tr in self.data['trades']:
+                    if tr.get('symbol') == prod:
+                        tr_c = tr.copy()
+                        if 'day' in tr_c: tr_c['timestamp'] += tr_c['day'] * 1000000
+                        prod_trades.append(tr_c)
+                prod_trades.sort(key=lambda x: x['timestamp'])
             realized, cash, pos, avg_cost = 0.0, 0.0, 0, 0.0
             pnl_array = []
             trade_idx = 0
@@ -957,14 +971,19 @@ class LogVisualizer(QMainWindow):
         for tr in self.data['trades']:
             if tr.get('symbol') != prod: continue
             if day != 'All' and tr.get('day', int(day)) != int(day): continue
+            
+            ts = tr.get('timestamp', 0)
+            if day == 'All' and 'day' in tr:
+                ts += tr['day'] * 1000000
+
             is_buy = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
             is_sell = str(tr.get('seller', '')).upper() == 'SUBMISSION'
             if is_buy:
-                mb_t.append(tr['timestamp']); mb_p.append(tr['price'])
+                mb_t.append(ts); mb_p.append(tr['price'])
             elif is_sell:
-                ms_t.append(tr['timestamp']); ms_p.append(tr['price'])
+                ms_t.append(ts); ms_p.append(tr['price'])
             else:
-                bot_raw.append((tr['timestamp'], tr['price'], int(tr.get('quantity', 1))))
+                bot_raw.append((ts, tr['price'], int(tr.get('quantity', 1))))
 
         if bot_raw:
             vols = np.array([v for _, _, v in bot_raw])
@@ -1049,7 +1068,7 @@ class LogVisualizer(QMainWindow):
         pos_map = {}
         cost_map = {}
 
-        for tr in sorted(prod_trades, key=lambda x: x.get('timestamp', 0)):
+        for tr in sorted(prod_trades, key=lambda x: (x.get('day', 0), x.get('timestamp', 0))):
             is_buyer = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
             is_seller = str(tr.get('seller', '')).upper() == 'SUBMISSION'
             qty = int(tr.get('quantity', 0))
@@ -1090,12 +1109,18 @@ class LogVisualizer(QMainWindow):
         winning_trades = sum(1 for r in realized_pnl_trades if r > 0)
         win_rate = (winning_trades / len(realized_pnl_trades) * 100) if realized_pnl_trades else 0.0
 
-        df = df.sort('timestamp')
+        if day == 'All' and 'day' in df.columns:
+            t_col = 'continuous_ts'
+            df = df.with_columns((pl.col('timestamp') + pl.col('day') * 1000000).alias(t_col))
+        else:
+            t_col = 'timestamp'
+
+        df = df.sort(t_col)
         
         if len(df) > 0:
-            agg_df = df.group_by('timestamp').agg(pl.col('profit_and_loss').sum().alias('pnl'))
-            agg_df = agg_df.sort('timestamp')
-            t = agg_df['timestamp'].to_numpy()
+            agg_df = df.group_by(t_col).agg(pl.col('profit_and_loss').sum().alias('pnl'))
+            agg_df = agg_df.sort(t_col)
+            t = agg_df[t_col].to_numpy()
             pnl_arr = agg_df['pnl'].to_numpy()
         else:
             t = np.array([])

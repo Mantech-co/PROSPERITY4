@@ -269,10 +269,14 @@ class Trader:
                 else:
                     continue
 
+                bid_wall = max(bid_orders, key=lambda x: x[0])[0]
+                ask_wall = min(ask_orders, key=lambda x: x[0])[0]
+                market_mid = (bid_wall + ask_wall) / 2.0
+
                 if tomatoes_ema is None:
-                    tomatoes_ema = vwap
+                    tomatoes_ema = market_mid
                 else:
-                    tomatoes_ema = alpha * vwap + (1 - alpha) * tomatoes_ema
+                    tomatoes_ema = alpha * market_mid + (1 - alpha) * tomatoes_ema
 
                 mid_price = round(tomatoes_ema)
 
@@ -295,9 +299,6 @@ class Trader:
                     slope = (tomato_smas[-1] - tomato_smas[0]) / (m_slope - 1)
                     
                 self.logger.log(mid_price=mid_price, vwap=vwap, sma=current_sma, slope=4940 + 10*slope)
-
-                bid_wall = max(bid_orders, key=lambda x: x[0])[0]
-                ask_wall = min(ask_orders, key=lambda x: x[0])[0]
 
                 ##########################################################
                 ####### 1. TAKING
