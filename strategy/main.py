@@ -50,9 +50,9 @@ class Logger:
             return
         self._emit(self.PREFIX + json.dumps(clean, separators=(',', ':')))
 
-    def log_order(self, side: str, price: int, qty: int, tag: str) -> None:
+    def log_order(self, product: str, side: str, price: int, qty: int, tag: str) -> None:
         """Log an individual order placement for strategy-level trade attribution."""
-        self._emit(f'LOGORDER:{side}:{price}:{qty}:{tag}')
+        self._emit(f'LOGORDER:{product}:{side}:{price}:{qty}:{tag}')
 
     def debug(self, msg: str, tag: str = 'DBG', product: str = '') -> None:
         self._emit(f'LOGDBG:{tag}:{product}:{msg}')
@@ -178,8 +178,7 @@ class BaseStrategy:
         exec_qty = min(quantity, self.buy_capacity)
         self.orders.append(Order(self.PRODUCT, int(price), exec_qty))
         self.buy_capacity -= exec_qty
-        self.sell_capacity += exec_qty
-        self.logger.log_order("BUY", int(price), exec_qty, tag)
+        self.logger.log_order(self.PRODUCT, "BUY", int(price), exec_qty, tag)
 
     def ask(self, price: int, quantity: int, tag: str = "MAKE"):
         """Place an ask, clamping to available sell capacity."""
@@ -188,8 +187,7 @@ class BaseStrategy:
         exec_qty = min(quantity, self.sell_capacity)
         self.orders.append(Order(self.PRODUCT, int(price), -exec_qty))
         self.sell_capacity -= exec_qty
-        self.buy_capacity += exec_qty
-        self.logger.log_order("SELL", int(price), exec_qty, tag)
+        self.logger.log_order(self.PRODUCT, "SELL", int(price), exec_qty, tag)
 
     def get_walls(self, min_vol: int = 1) -> Tuple[Optional[int], Optional[int]]:
         """Find best bid/ask walls with at least min_vol."""
@@ -278,25 +276,25 @@ class MarketMaker:
         # to not place orders at the outlier price
         
 
-        bid_price = bid_wall + (1 if bid_wall < mid_target-1 else -1)
-        ask_price = ask_wall - (1 if ask_wall > mid_target+1 else -1)
+        bid_price = bid_wall + (1 if bid_wall < mid_target else -1)
+        ask_price = ask_wall - (1 if ask_wall > mid_target else -1)
         
-        for bp, bv in sorted_bids:
-            if bv > 1 and bp + 1 < mid_target:
-                bid_price = max(bid_price, bp + 1)
-                break
-            elif bp < mid_target:
-                bid_price = max(bid_price, bp)
-                break
+        # for bp, bv in sorted_bids:
+        #     if bv > 1 and bp + 1 < mid_target:
+        #         bid_price = max(bid_price, bp + 1)
+        #         break
+        #     elif bp < mid_target:
+        #         bid_price = max(bid_price, bp)
+        #         break
                 
-        for sp, sv in sorted_asks:
-            if abs(sv) > 1 and sp - 1 > mid_target:
-                ask_price = min(ask_price, sp - 1)
-                break
-            elif sp > mid_target:
-                ask_price = min(ask_price, sp)
-                break
-
+        # for sp, sv in sorted_asks:
+        #     if abs(sv) > 1 and sp - 1 > mid_target:
+        #         ask_price = min(ask_price, sp - 1)
+        #         break
+        #     elif sp > mid_target:
+        #         ask_price = min(ask_price, sp)
+        #         break
+        strat.logger.log(bid_price_e=bid_price, ask_price_e=ask_price)
         if bid_price < mid_target:
             strat.bid(bid_price, strat.buy_capacity)
                 
@@ -418,7 +416,7 @@ class Trader:
 
         # Instantiate strategies once
         self.emerald_strat = EmeraldStrategy(self.logger, self.emerald_params)
-        self.tomato_strat = TomatoStrategy(self.logger, self.tomato_params)
+        #self.tomato_strat = TomatoStrategy(self.logger, self.tomato_params)
     
     def run(self, state: TradingState):
         """Main dispatcher — only per-tick work happens here."""
@@ -436,9 +434,9 @@ class Trader:
             self.emerald_strat.reset(state)
             result["EMERALDS"] = self.emerald_strat.run(state_dict)
 
-        if "TOMATOES" in state.order_depths:
-            self.tomato_strat.reset(state)
-            result["TOMATOES"] = self.tomato_strat.run(state_dict)
+        # if "TOMATOES" in state.order_depths:
+        #     self.tomato_strat.reset(state)
+        #     result["TOMATOES"] = self.tomato_strat.run(state_dict)
 
         # 3. Serialize Persistence State
         traderData = json.dumps(state_dict)

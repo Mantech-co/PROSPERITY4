@@ -730,10 +730,15 @@ class ProsperityVisualizer(QMainWindow):
             bid_idx = bid_y.astype(np.int64) * w + bid_x.astype(np.int64)
             np.maximum.at(blue, bid_idx, bid_i)
 
-        img = np.zeros((h, w, 3), dtype=np.uint8)
-        img[..., 0] = red.reshape(h, w)
-        img[..., 2] = blue.reshape(h, w)
+        img = np.zeros((h, w, 4), dtype=np.uint8)
+        img_r = red.reshape(h, w)
+        img_b = blue.reshape(h, w)
+        img[..., 0] = img_r
+        img[..., 2] = img_b
+        # Set alpha: transparent (0) where no data, semi-transparent (180) where data exists
+        img[..., 3] = np.where((img_r > 0) | (img_b > 0), 180, 0)
         return img
+
 
     def load_round_data(self, round_str):
         """Loads all CSVs associated with the selected round dynamically."""

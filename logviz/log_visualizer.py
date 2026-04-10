@@ -46,6 +46,11 @@ SELL_VOLUME_COLORS = [
     [204, 68, 255],  # 10 violet
 ]
 
+# ── Order Placement Heatmap Coloring (General Red/Blue with Brightness) ────────
+# Buy = Blue, Sell = Red. Indices 0 (low volume) to 9 (high volume).
+ORDER_BUY_COLORS = [[0, 0, int(100 + i * 15.5)] for i in range(10)]
+ORDER_SELL_COLORS = [[int(100 + i * 15.5), 0, 0] for i in range(10)]
+
 # Dedicated palette for bot trade markers (volume only, no buy/sell split)
 # 20 colors — only as many are used as there are unique quantile buckets.
 TRADE_VOLUME_COLORS = [
@@ -345,25 +350,73 @@ def build_ob_heatmap(p_df: pl.DataFrame, product: str, day, continuous_ts=False)
             np.maximum.at(red_l if side == 'ask' else blue_l, flat_idxs, lvl)
             raw_vol.flat[flat_idxs] += va[mask]
 
-    # Construct RGB image using palettes
-    img = np.zeros((h, w, 3), np.uint8)
+    # Construct RGBA image using palettes
+    img = np.zeros((h, w, 4), np.uint8)
     
     # Reconstruct 2D level grids
     red_img_l = red_l.reshape(h, w)
     blue_img_l = blue_l.reshape(h, w)
     
-    # Map levels to colors
+    # Map levels to colors (with alpha for visibility override)
     for l in range(10):
         mask_r = (red_img_l == l) & (red_img_l > 0)
         if np.any(mask_r):
-            img[mask_r] = SELL_VOLUME_COLORS[l]
+            img[mask_r] = SELL_VOLUME_COLORS[l] + [200]
             
         mask_b = (blue_img_l == l) & (blue_img_l > 0)
         if np.any(mask_b):
-            # If they overlap, let one win or blend? Last one wins for now.
-            img[mask_b] = BUY_VOLUME_COLORS[l]
+            img[mask_b] = BUY_VOLUME_COLORS[l] + [200]
+
 
     return {'img': img, 'times': times, 'levels': price_levels, 'raw_vol': raw_vol, 'max_vol': max_vol}
+
+def build_order_placement_heatmap(orders, product, day, times, p_min, p_max, continuous_ts=False, min_day=0):
+    try:
+        if day != 'All':
+            day_val = int(day)
+            flt = [o for o in orders if (o['product'] == product or o['product'] == '') and o['day'] == day_val]
+        else:
+            flt = [o for o in orders if (o['product'] == product or o['product'] == '')]
+    except:
+        flt = [o for o in orders if (o['product'] == product or o['product'] == '')]
+
+    if not flt or len(times) == 0:
+        return None
+
+    h = p_max - p_min + 1
+    w = len(times)
+    img = np.zeros((h, w, 4), np.uint8)
+
+    
+    # max_vol for normalization
+    vols = [o['qty'] for o in flt]
+    max_vol = max(vols) if vols else 1.0
+
+    # Build lookup for timestamp to index
+    ts_to_idx = {ts: i for i, ts in enumerate(times)}
+
+    for o in flt:
+        ts = o['ts']
+        if day == 'All' and not continuous_ts:
+            ts += (o['day'] - min_day) * 1_000_000
+        
+        if ts not in ts_to_idx:
+            continue
+        
+        x = ts_to_idx[ts]
+        y = o['price'] - p_min
+        if not (0 <= y < h):
+            continue
+        
+        side = o['side']
+        vol = o['qty']
+        lvl = np.clip(int(vol / max_vol * 10), 0, 9)
+        
+        color = (ORDER_BUY_COLORS[lvl] if side == 'BUY' else ORDER_SELL_COLORS[lvl]) + [220]
+        img[y, x] = color
+
+
+    return {'img': img}
 
 class LogVisualizer(QMainWindow):
     def __init__(self, log_path=None):
@@ -372,6 +425,7 @@ class LogVisualizer(QMainWindow):
         self.setGeometry(50, 50, 1600, 920)
         self.data, self.current_df, self.ob_res = None, None, None
         self.custom_curves = {}
+        self.sandbox_msgs = {}  # msg -> [timestamps]
         pg.setConfigOptions(useOpenGL=True, imageAxisOrder='row-major')
         self._build_ui()
         if log_path: self._load_file(log_path)
@@ -432,6 +486,8 @@ class LogVisualizer(QMainWindow):
         self.p_m = self.gw_m.addPlot(); self.p_m.showGrid(x=True, y=True, alpha=0.3)
         
         self.img_item = pg.ImageItem(); self.img_item.setZValue(0); self.p_m.addItem(self.img_item)
+        self.img_orders = pg.ImageItem(); self.img_orders.setZValue(1); self.p_m.addItem(self.img_orders)
+        self.img_orders.setVisible(False)
         self.curve_mid = self.p_m.plot(pen=pg.mkPen(ACCENT_CYAN, width=2), name="Mid Price")
         self.sc_bot = pg.ScatterPlotItem(symbol='x', size=7, brush=ACCENT_WHITE, name="Bot Trades")
         self.sc_buy = pg.ScatterPlotItem(symbol='t1', size=10, brush=ACCENT_GREEN, name="My Buy")
@@ -445,6 +501,9 @@ class LogVisualizer(QMainWindow):
         # Use a PlotDataItem proxy for the Heatmap so Legend doesn't crash
         self._heatmap_proxy = pg.PlotDataItem(pen=None, brush=pg.mkBrush(ACCENT_PURPLE))
         self.leg_m.addItem(self._heatmap_proxy, "Heatmap", toggle_target=self.img_item)
+        
+        self._orders_proxy = pg.PlotDataItem(pen=None, brush=pg.mkBrush(ACCENT_WHITE))
+        self.leg_m.addItem(self._orders_proxy, "Order Placement", toggle_target=self.img_orders)
         self.leg_m.addItem(self.curve_mid, "Mid Price")
         self.leg_m.addItem(self.sc_bot, "Bot Trades")
         self.leg_m.addItem(self.sc_buy, "My Buy")
@@ -524,6 +583,9 @@ class LogVisualizer(QMainWindow):
         QShortcut(QKeySequence("X"), self).activated.connect(lambda: self._set_zoom("x"))
         QShortcut(QKeySequence("Y"), self).activated.connect(lambda: self._set_zoom("y"))
         QShortcut(QKeySequence("Z"), self).activated.connect(lambda: self._set_zoom("xy"))
+
+        # SandboxLog Tab
+        self._build_sandbox_tab()
 
     def _build_dashboard_tab(self):
         dash_container = QWidget()
@@ -615,6 +677,86 @@ class LogVisualizer(QMainWindow):
         self.tabs.insertTab(0, dash_container, "Dashboard")
         self.tabs.setCurrentIndex(0)
 
+    def _build_sandbox_tab(self):
+        sandbox_container = QWidget()
+        sandbox_layout = QVBoxLayout(sandbox_container)
+        sandbox_layout.setContentsMargins(0, 0, 0, 0)
+        sandbox_layout.setSpacing(0)
+
+        # Filter bar
+        sb_filter_bar = QHBoxLayout()
+        sb_filter_bar.setContentsMargins(8, 6, 8, 6)
+        self.sb_filter_input = QLineEdit()
+        self.sb_filter_input.setPlaceholderText("Filter sandbox logs...")
+        self.sb_filter_input.textChanged.connect(self._filter_sandbox_table)
+        sb_filter_bar.addWidget(QLabel("🔍"))
+        sb_filter_bar.addWidget(self.sb_filter_input)
+        sandbox_layout.addLayout(sb_filter_bar)
+
+        # Main Splitter style layout (Table + Detail)
+        sb_content_layout = QHBoxLayout()
+        
+        self.sb_table = QTableWidget()
+        self.sb_table.setColumnCount(2)
+        self.sb_table.setHorizontalHeaderLabels(['Message', 'Occurrences'])
+        self.sb_table.horizontalHeader().setStretchLastSection(False)
+        self.sb_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.sb_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.sb_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.sb_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sb_table.verticalHeader().setVisible(False)
+        self.sb_table.setAlternatingRowColors(True)
+        self.sb_table.itemSelectionChanged.connect(self._on_sb_selection_changed)
+        
+        sb_content_layout.addWidget(self.sb_table, stretch=2)
+
+        # Detail Panel (for timestamps)
+        self.sb_detail_panel = QFrame()
+        self.sb_detail_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        self.sb_detail_panel.setStyleSheet(f"background-color: {PANEL_BG}; border-left: 1px solid {BORDER};")
+        self.sb_detail_panel.setFixedWidth(300)
+        
+        detail_layout = QVBoxLayout(self.sb_detail_panel)
+        detail_layout.addWidget(QLabel("<b>Occurrence Timestamps</b>"))
+        self.sb_detail_text = QLabel("Select a message to see timestamps")
+        self.sb_detail_text.setWordWrap(True)
+        self.sb_detail_text.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        
+        detail_scroll = QScrollArea()
+        detail_scroll.setWidgetResizable(True)
+        detail_scroll.setWidget(self.sb_detail_text)
+        detail_layout.addWidget(detail_scroll)
+        
+        sb_content_layout.addWidget(self.sb_detail_panel)
+        
+        sandbox_layout.addLayout(sb_content_layout)
+        self.tabs.addTab(sandbox_container, "SandboxLog")
+
+    def _on_sb_selection_changed(self):
+        items = self.sb_table.selectedItems()
+        if not items:
+            self.sb_detail_text.setText("Select a message to see timestamps")
+            return
+        
+        msg = items[0].text()
+        if msg in self.sandbox_msgs:
+            ts_list = self.sandbox_msgs[msg]
+            display_ts = ts_list[:20]
+            truncated = len(ts_list) > 20
+            
+            txt = f"<b>Total occurrences: {len(ts_list)}</b><br><br>"
+            txt += "<br>".join([str(ts) for ts in display_ts])
+            if truncated:
+                txt += "<br><i>... (truncated)</i>"
+            self.sb_detail_text.setText(txt)
+
+    def _filter_sandbox_table(self, text):
+        text = text.lower()
+        for row in range(self.sb_table.rowCount()):
+            item = self.sb_table.item(row, 0)
+            if item:
+                self.sb_table.setRowHidden(row, text not in item.text().lower())
+
     def _on_mouse_moved(self, pos):
         if not self.p_m.sceneBoundingRect().contains(pos) or self.current_df is None: return
         mouse_point = self.p_m.vb.mapSceneToView(pos)
@@ -702,7 +844,7 @@ class LogVisualizer(QMainWindow):
             return
             
         df = pl.concat(p_dfs)
-        self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': [], '_continuous_ts': False}
+        self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': [], 'orders': [], '_continuous_ts': False}
         
         self.cb_prod.blockSignals(True)
         products = df['product'].unique().sort().to_list()
@@ -732,15 +874,46 @@ class LogVisualizer(QMainWindow):
         df = pl.read_csv(StringIO(csv_str), separator=';', null_values=['', 'nan'])
         df = df.rename({c: c.strip() for c in df.columns})
         
-        custom = {}
+        custom, orders, sandbox_msgs = {}, [], {}
         for entry in raw.get('logs', []):
             ts, log = entry.get('timestamp', 0), entry.get('lambdaLog', '') or ''
+            sb_log = (entry.get('sandboxLog', '') or '').strip()
+            if sb_log:
+                sandbox_msgs.setdefault(sb_log, []).append(ts)
+            
             for line in log.split('\n'):
                 if line.startswith('LOGVIZ:'):
                     try:
                         payload = json.loads(line[7:])
-                        for k, v in payload.items(): custom.setdefault(k, []).append((ts, float(v)))
-                    except: pass
+                        for k, v in payload.items():
+                            custom.setdefault(k, []).append((ts, float(v)))
+                    except:
+                        pass
+                elif line.startswith('LOGORDER:'):
+                    # Format: LOGORDER:{product}:{side}:{price}:{qty}:{tag} OR LOGORDER:{side}:{price}:{qty}:{tag}
+                    parts = line.split(':')
+                    if len(parts) == 6:
+                        prod, side, price, qty, tag = parts[1], parts[2], parts[3], parts[4], parts[5]
+                        orders.append({
+                            'ts': ts,
+                            'day': ts // 1_000_000,
+                            'product': prod.upper(),
+                            'side': side.upper(),
+                            'price': int(price),
+                            'qty': int(qty),
+                            'tag': tag
+                        })
+                    elif len(parts) == 5:
+                        side, price, qty, tag = parts[1], parts[2], parts[3], parts[4]
+                        orders.append({
+                            'ts': ts,
+                            'day': ts // 1_000_000,
+                            'product': '',
+                            'side': side.upper(),
+                            'price': int(price),
+                            'qty': int(qty),
+                            'tag': tag
+                        })
 
         # Parse debug messages: LOGDBG:timestamp:tag:product:message
         debug_msgs = []
@@ -768,7 +941,21 @@ class LogVisualizer(QMainWindow):
                         'msg': msg.strip()
                     })
 
-        self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom, 'debug': debug_msgs, '_continuous_ts': _is_timestamps_continuous(df)}
+        # Check for top-level error
+        if raw.get('error'):
+            err_msg = str(raw['error']).strip()
+            sandbox_msgs.setdefault(err_msg, []).append("N/A")
+
+        self.sandbox_msgs = sandbox_msgs
+
+        self.data = {
+            'prices_df': df, 
+            'trades': raw.get('tradeHistory', []), 
+            'custom': custom, 
+            'debug': debug_msgs, 
+            'orders': orders,
+            '_continuous_ts': _is_timestamps_continuous(df)
+        }
         self.cb_prod.blockSignals(True)
         products = df['product'].unique().sort().to_list()
         self.cb_prod.clear(); self.cb_prod.addItems(products)
@@ -784,9 +971,28 @@ class LogVisualizer(QMainWindow):
         self._build_custom_plots()
         self._build_position_plot()
         self._build_logs_table()
+        self._update_sandbox_table()
         self._process_selection()
         if hasattr(self, 'cb_dash_prod'):
             self._update_dashboard()
+
+    def _update_sandbox_table(self):
+        self.sb_table.clearContents()
+        self.sb_table.setRowCount(len(self.sandbox_msgs))
+        
+        for i, (msg, ts_list) in enumerate(sorted(self.sandbox_msgs.items(), key=lambda x: len(x[1]), reverse=True)):
+            msg_item = QTableWidgetItem(msg)
+            count_item = QTableWidgetItem(str(len(ts_list)))
+            count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # Use red if it's an error/not empty
+            msg_item.setForeground(QBrush(QColor(ACCENT_RED)))
+            
+            self.sb_table.setItem(i, 0, msg_item)
+            self.sb_table.setItem(i, 1, count_item)
+        
+        self.sb_table.scrollToTop()
+        self.sb_detail_text.setText("Select a message to see timestamps")
 
     def _build_logs_table(self):
         debug_msgs = self.data.get('debug', [])
@@ -1067,6 +1273,25 @@ class LogVisualizer(QMainWindow):
         else:
             self.img_item.setVisible(False)
         self.hm_legend.update_ranges(ob_max_vol, quantile_edges)
+
+        # Order Placement Heatmap
+        if self.ob_res:
+            p_min, p_max = int(self.ob_res['levels'][0]), int(self.ob_res['levels'][-1])
+            order_res = build_order_placement_heatmap(
+                self.data.get('orders', []), 
+                prod, day, t, p_min, p_max, 
+                continuous_ts=continuous_ts, 
+                min_day=min_day
+            )
+            if order_res:
+                self.img_orders.setImage(order_res['img'], autoLevels=False)
+                x_min, x_max = t[0], t[-1]
+                x_step = (t[1] - t[0]) if len(t) > 1 else 100
+                self.img_orders.setRect(QRectF(x_min - 0.5 * x_step, p_min - 0.5, (len(t)) * x_step, p_max - p_min + 1))
+            else:
+                self.img_orders.clear()
+        else:
+            self.img_orders.clear()
 
         custom_data = self.data.get('custom', {})
         if len(t) > 0:
