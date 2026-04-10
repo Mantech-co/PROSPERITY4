@@ -1,6 +1,9 @@
 # Environments
 .venv/
 
+# sample codes
+other_codes/
+
 # Python
 *.pyc
 __pycache__/

@@ -267,15 +267,33 @@ class HeatmapLegend(QWidget):
                 cell.setVisible(False)
                 rlbl.setText("")
 
+def _is_timestamps_continuous(df):
+    """Detect if multi-day timestamps are already continuously merged (backtester output).
+    Returns True if timestamps are monotonically increasing across different days."""
+    if 'day' not in df.columns: return False
+    days = df['day'].unique().sort().to_list()
+    if len(days) <= 1: return False
+    # Check if the last timestamp of day N is less than the first timestamp of day N+1
+    for i in range(len(days) - 1):
+        d1_max = df.filter(pl.col('day') == days[i])['timestamp'].max()
+        d2_min = df.filter(pl.col('day') == days[i + 1])['timestamp'].min()
+        if d2_min > d1_max:
+            return True  # timestamps are already offset by merger
+    return False
+
 # --- Data Engine ---
-def build_ob_heatmap(p_df: pl.DataFrame, product: str, day):
+def build_ob_heatmap(p_df: pl.DataFrame, product: str, day, continuous_ts=False):
     flt = p_df.filter(pl.col('product') == product)
     min_day = p_df['day'].min() if 'day' in p_df.columns else 0
-    if day != 'All': flt = flt.filter(pl.col('day') == int(day))
+    try:
+        if day != 'All': flt = flt.filter(pl.col('day') == int(day))
+    except (ValueError, TypeError):
+        pass
     flt = flt.sort(['day', 'timestamp'])
     
     # Use relative day offset (plot_time) for multi-day views
-    if day == 'All' and 'day' in flt.columns:
+    # Skip offset if timestamps are already continuous (backtester merger)
+    if day == 'All' and 'day' in flt.columns and not continuous_ts:
         times = (flt['timestamp'] + (flt['day'] - min_day) * 1_000_000).to_numpy()
     else:
         times = flt['timestamp'].to_numpy()
@@ -295,8 +313,11 @@ def build_ob_heatmap(p_df: pl.DataFrame, product: str, day):
     if not all_p: return None
     concat_p = np.concatenate(all_p)
     if len(concat_p) == 0: return None
-    price_levels = np.unique(concat_p)
     max_vol = max(np.max(np.concatenate(all_v)), 1.0)
+    
+    # Use contiguous integer price levels so gaps between bid/ask are visible
+    p_min, p_max = int(np.min(concat_p)), int(np.max(concat_p))
+    price_levels = np.arange(p_min, p_max + 1, dtype=float)
     
     w, h = len(times), len(price_levels)
     
@@ -314,8 +335,10 @@ def build_ob_heatmap(p_df: pl.DataFrame, product: str, day):
             mask = np.isfinite(pa) & (pa > 0)
             v_idx = np.where(mask)[0]
             if len(v_idx) == 0: continue
-            y_idxs = np.searchsorted(price_levels, pa[mask])
-            flat_idxs = y_idxs.astype(np.int64) * w + v_idx.astype(np.int64)
+            # Map prices to contiguous integer indices
+            y_idxs = (pa[mask] - p_min).astype(np.int64)
+            y_idxs = np.clip(y_idxs, 0, h - 1)
+            flat_idxs = y_idxs * w + v_idx.astype(np.int64)
             
             # Map volume to 10 discrete bands (0-9)
             lvl = np.clip(va[mask] / max_vol * 10, 0, 9).astype(np.uint8)
@@ -679,7 +702,7 @@ class LogVisualizer(QMainWindow):
             return
             
         df = pl.concat(p_dfs)
-        self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': []}
+        self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': [], '_continuous_ts': False}
         
         self.cb_prod.blockSignals(True)
         products = df['product'].unique().sort().to_list()
@@ -745,7 +768,7 @@ class LogVisualizer(QMainWindow):
                         'msg': msg.strip()
                     })
 
-        self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom, 'debug': debug_msgs}
+        self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom, 'debug': debug_msgs, '_continuous_ts': _is_timestamps_continuous(df)}
         self.cb_prod.blockSignals(True)
         products = df['product'].unique().sort().to_list()
         self.cb_prod.clear(); self.cb_prod.addItems(products)
@@ -904,15 +927,21 @@ class LogVisualizer(QMainWindow):
     def _process_selection(self):
         if not self.data or not self.cb_prod.currentText(): return
         prod, day = self.cb_prod.currentText(), self.cb_day.currentText()
+        if not prod: return
         self.current_df = self.data['prices_df'].filter(pl.col('product') == prod)
-        if day != 'All': self.current_df = self.current_df.filter(pl.col('day') == int(day))
+        try:
+            if day != 'All' and day: self.current_df = self.current_df.filter(pl.col('day') == int(day))
+        except (ValueError, TypeError):
+            pass
         
         has_day = 'day' in self.current_df.columns
         self.current_df = self.current_df.sort(['day', 'timestamp'] if has_day else ['timestamp'])
         
+        # Detect if timestamps are already continuously merged (backtester output)
+        continuous_ts = self.data.get('_continuous_ts', False)
         min_day = self.data['prices_df']['day'].min() if 'day' in self.data['prices_df'].columns else 0
         t = self.current_df['timestamp'].to_numpy()
-        if day == 'All' and has_day:
+        if day == 'All' and has_day and not continuous_ts:
             t = t + (self.current_df['day'].to_numpy() - min_day) * 1000000
 
         mid = self.current_df['mid_price'].to_numpy()
@@ -924,14 +953,18 @@ class LogVisualizer(QMainWindow):
             pnl_data = self.current_df['profit_and_loss'].to_numpy() if 'profit_and_loss' in self.current_df.columns else np.zeros(len(t))
         else:
             # Calculate from trades
-            if day != 'All':
-                prod_trades = sorted([tr for tr in self.data['trades'] if tr.get('symbol') == prod and tr.get('day', int(day)) == int(day)], key=lambda x: x['timestamp'])
+            try:
+                day_int = int(day) if day and day != 'All' else None
+            except (ValueError, TypeError):
+                day_int = None
+            if day_int is not None:
+                prod_trades = sorted([tr for tr in self.data['trades'] if tr.get('symbol') == prod and tr.get('day', day_int) == day_int], key=lambda x: x['timestamp'])
             else:
                 prod_trades = []
                 for tr in self.data['trades']:
                     if tr.get('symbol') == prod:
                         tr_c = tr.copy()
-                        if 'day' in tr_c: tr_c['timestamp'] += (tr_c['day'] - min_day) * 1000000
+                        if 'day' in tr_c and not continuous_ts: tr_c['timestamp'] += (tr_c['day'] - min_day) * 1000000
                         prod_trades.append(tr_c)
                 prod_trades.sort(key=lambda x: x['timestamp'])
             realized, cash, pos, avg_cost = 0.0, 0.0, 0, 0.0
@@ -976,10 +1009,13 @@ class LogVisualizer(QMainWindow):
         bot_raw = []  # (ts, price, vol)
         for tr in self.data['trades']:
             if tr.get('symbol') != prod: continue
-            if day != 'All' and tr.get('day', int(day)) != int(day): continue
+            try:
+                if day != 'All' and day and tr.get('day', int(day)) != int(day): continue
+            except (ValueError, TypeError):
+                pass
             
             ts = tr.get('timestamp', 0)
-            if day == 'All' and 'day' in tr:
+            if day == 'All' and 'day' in tr and not continuous_ts:
                 ts += (tr['day'] - min_day) * 1000000
 
             is_buy = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
@@ -1019,7 +1055,7 @@ class LogVisualizer(QMainWindow):
         self.sc_sell.setData(x=ms_t, y=ms_p)
         self.sc_bot.setData(x=b_t, y=b_p, brush=b_brushes, size=b_sizes)
 
-        self.ob_res = build_ob_heatmap(self.data['prices_df'], prod, day)
+        self.ob_res = build_ob_heatmap(self.data['prices_df'], prod, day, continuous_ts=continuous_ts)
         ob_max_vol = self.ob_res['max_vol'] if self.ob_res else 1.0
         if self.ob_res:
             self.img_item.setImage(self.ob_res['img'], autoLevels=False)
@@ -1069,10 +1105,14 @@ class LogVisualizer(QMainWindow):
         volume_traded = 0
         realized_pnl_trades = []
         
+        try:
+            day_int = int(day) if day and day != 'All' else None
+        except (ValueError, TypeError):
+            day_int = None
         if prod != 'Overall':
-            prod_trades = [tr for tr in trades if tr.get('symbol') == prod and (day == 'All' or tr.get('day', int(day)) == int(day))]
+            prod_trades = [tr for tr in trades if tr.get('symbol') == prod and (day_int is None or tr.get('day', day_int) == day_int)]
         else:
-            prod_trades = [tr for tr in trades if (day == 'All' or tr.get('day', int(day)) == int(day))]
+            prod_trades = [tr for tr in trades if (day_int is None or tr.get('day', day_int) == day_int)]
 
         pos_map = {}
         cost_map = {}
@@ -1118,7 +1158,8 @@ class LogVisualizer(QMainWindow):
         winning_trades = sum(1 for r in realized_pnl_trades if r > 0)
         win_rate = (winning_trades / len(realized_pnl_trades) * 100) if realized_pnl_trades else 0.0
 
-        if day == 'All' and 'day' in df.columns:
+        continuous_ts = self.data.get('_continuous_ts', False)
+        if day == 'All' and 'day' in df.columns and not continuous_ts:
             t_col = 'continuous_ts'
             min_day = self.data['prices_df']['day'].min() if 'day' in self.data['prices_df'].columns else 0
             df = df.with_columns((pl.col('timestamp') + (pl.col('day') - min_day) * 1000000).alias(t_col))

@@ -142,24 +142,11 @@ class OrderMatchMaker:
             # try match from market_trades
             matched_market_trades = [trade for trade in market_trades if self.__can_match_buy_order(order, trade)]
             for market_trade in matched_market_trades:
-                # order book bids at price >= order.price have priority and consume market_trade first
-                buy_price_depth = self.state.order_depths[order.symbol].buy_orders
-                prices_to_consume = sorted((p for p in buy_price_depth.keys() if p >= order.price), reverse=True)
-                for p in prices_to_consume:
-                    if market_trade.sell_quantity == 0:
-                        break
-                    vol_to_consume = min(market_trade.sell_quantity, buy_price_depth[p])
-                    if vol_to_consume > 0:
-                        market_trade.sell_quantity -= vol_to_consume
-                        market_trade.buy_quantity -= vol_to_consume
-                        self.__deduct_volume_from_order(buy_price_depth, p, vol_to_consume)
-
                 volume = min(order.quantity, market_trade.sell_quantity)
-                if volume > 0:
-                    market_trade.sell_quantity -= volume
-                    # market_trade.sell_quantity = 0
-                    trade = self.__create_buy_order(order, volume, order.price, market_trade.trade.seller)
-                    trades.append(trade)
+                market_trade.sell_quantity -= volume
+                # market_trade.sell_quantity = 0
+                trade = self.__create_buy_order(order, volume, order.price, market_trade.trade.seller)
+                trades.append(trade)
                 if order.quantity == 0:
                     return trades
 
@@ -170,24 +157,11 @@ class OrderMatchMaker:
         if self.trade_matching_mode != TradeMatchingMode.none:
             matched_market_trades = [trade for trade in market_trades if self.__can_match_sell_order(order, trade)]
             for market_trade in matched_market_trades:
-                # order book asks at price <= order.price have priority and consume market_trade first
-                sell_price_depth = self.state.order_depths[order.symbol].sell_orders
-                prices_to_consume = sorted((p for p in sell_price_depth.keys() if p <= order.price))
-                for p in prices_to_consume:
-                    if market_trade.buy_quantity == 0:
-                        break
-                    vol_to_consume = min(market_trade.buy_quantity, abs(sell_price_depth[p]))
-                    if vol_to_consume > 0:
-                        market_trade.buy_quantity -= vol_to_consume
-                        market_trade.sell_quantity -= vol_to_consume
-                        self.__deduct_volume_from_order(sell_price_depth, p, vol_to_consume)
-
                 volume = min(abs(order.quantity), market_trade.buy_quantity)
-                if volume > 0:
-                    market_trade.buy_quantity -= volume
-                    # market_trade.buy_quantity = 0
-                    trade = self.__create_sell_order(order, volume, order.price, market_trade.trade.buyer)
-                    trades.append(trade)
+                market_trade.buy_quantity -= volume
+                # market_trade.buy_quantity = 0
+                trade = self.__create_sell_order(order, volume, order.price, market_trade.trade.buyer)
+                trades.append(trade)
                 if order.quantity == 0:
                     return trades
 
