@@ -104,7 +104,7 @@ def build_order_placement_heatmap(orders, product, day, times, p_min, p_max, con
     for o in flt:
         ts = o['ts']
         if day == 'All' and not continuous_ts:
-            ts += o['day'] * 1_000_000
+            ts += (o['day'] - min_day) * 1_000_000
         
         if ts not in ts_to_idx:
             continue
