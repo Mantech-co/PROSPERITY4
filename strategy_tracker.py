@@ -28,10 +28,12 @@ DEPENDENCIES
 
 import base64
 import csv
+import http.client
 import io
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -127,6 +129,18 @@ def extract_metrics(log_path: str) -> dict:
     sharpe                 = _compute_sharpe(agg_pnl_series)
     max_dd_abs, max_dd_pct = _compute_drawdown(agg_pnl_series)
 
+    # Downsample PnL series for storage (max 500 points to keep record size small)
+    pnl_series_storage = []
+    if agg_pnl_series:
+        if len(agg_pnl_series) > 500:
+            step = len(agg_pnl_series) / 500.0
+            pnl_series_storage = [round(agg_pnl_series[int(i * step)], 2) for i in range(500)]
+            # Ensure the last point is included
+            if round(agg_pnl_series[-1], 2) != pnl_series_storage[-1]:
+                pnl_series_storage.append(round(agg_pnl_series[-1], 2))
+        else:
+            pnl_series_storage = [round(v, 2) for v in agg_pnl_series]
+
     per_product_pnl: dict[str, float] = {}
     for key in sorted_keys:
         for prod, pnl in ts_product_pnl[key].items():
@@ -153,6 +167,7 @@ def extract_metrics(log_path: str) -> dict:
         "products":          sorted(products_seen),
         "days":              sorted(days_seen),
         "per_product_pnl":   {k: round(v, 4) for k, v in per_product_pnl.items()},
+        "pnl_series":        pnl_series_storage,
         "total_trades":      total_trades,
         "submission_trades": submission_trades,
         "submission_volume": submission_volume,
@@ -182,9 +197,9 @@ def _validate_and_extract_log(zip_path: str) -> tuple[dict, dict]:
         log_bytes    = zf.read(by_ext[".log"][0])
         config_bytes = zf.read(by_ext[".json"][0])
 
-    tmp = f"/tmp/_tracker_{uuid.uuid4().hex}.log"
+    tmp_fd, tmp = tempfile.mkstemp(suffix=".log", prefix="_tracker_")
     try:
-        with open(tmp, "wb") as fh:
+        with os.fdopen(tmp_fd, "wb") as fh:
             fh.write(log_bytes)
         metrics = extract_metrics(tmp)
     finally:
@@ -218,13 +233,20 @@ class GitHubRepo:
             "Content-Type":         "application/json",
         }
 
+    def _safe_read(self, resp) -> bytes:
+        try:
+            return resp.read()
+        except http.client.IncompleteRead as e:
+            return e.partial
+
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         url  = f"{self.API_BASE}/repos/{self.repo}/contents/{path}"
         data = json.dumps(body).encode() if body else None
         req  = urllib.request.Request(url, data=data, headers=self._headers(), method=method)
         try:
             with urllib.request.urlopen(req) as resp:
-                return json.loads(resp.read().decode())
+                raw_data = self._safe_read(resp)
+                return json.loads(raw_data.decode())
         except urllib.error.HTTPError as e:
             detail = e.read().decode()
             raise RuntimeError(f"GitHub {method} {path} → {e.code}: {detail}") from e
@@ -234,7 +256,8 @@ class GitHubRepo:
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
             with urllib.request.urlopen(req) as resp:
-                return json.loads(resp.read().decode()).get("sha")
+                raw_data = self._safe_read(resp)
+                return json.loads(raw_data.decode()).get("sha")
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return None
@@ -255,7 +278,8 @@ class GitHubRepo:
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
             with urllib.request.urlopen(req) as resp:
-                return json.loads(resp.read().decode())
+                raw_data = self._safe_read(resp)
+                return json.loads(raw_data.decode())
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return []
@@ -266,8 +290,11 @@ class GitHubRepo:
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
             with urllib.request.urlopen(req) as resp:
-                data = json.loads(resp.read().decode())
-                return base64.b64decode(data["content"].replace("\n", ""))
+                raw_data = self._safe_read(resp)
+                data     = json.loads(raw_data.decode())
+                if "content" in data:
+                    return base64.b64decode(data["content"].replace("\n", ""))
+                return None
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return None
@@ -582,6 +609,63 @@ class LabeledEntry(tk.Frame):
         self.var.set(v)
 
 
+def _draw_pnl_on_canvas(canvas, pnl_series, final_pnl=None):
+    canvas.update_idletasks()
+    w = canvas.winfo_width()
+    h = canvas.winfo_height()
+    if w <= 1:
+        return
+    canvas.delete("all")
+    if not pnl_series:
+        canvas.create_text(w // 2, h // 2, text="(no PnL series available)",
+                           font=FONT_MONO2, fill=TEXT2)
+        return
+
+    # Use reported PnL if the series is inconsistent or missing its tail
+    display_pnl = final_pnl if final_pnl is not None else pnl_series[-1]
+
+    min_pnl = min(pnl_series + [display_pnl])
+    max_pnl = max(pnl_series + [display_pnl])
+    # Add buffer
+    span = max_pnl - min_pnl
+    if span == 0: span = 1
+    
+    y_min = min_pnl - 0.1 * abs(span)
+    y_max = max_pnl + 0.1 * abs(span)
+    y_span = y_max - y_min
+    if y_span == 0: y_span = 1
+
+    def to_y(val):
+        return h - 10 - ((val - y_min) / y_span) * (h - 20)
+
+    # Baseline (zero)
+    if y_min <= 0 <= y_max:
+        zy = to_y(0)
+        canvas.create_line(10, zy, w - 10, zy, fill=BORDER2, width=1, dash=(2, 2))
+
+    pts = []
+    n = len(pnl_series)
+    for i, v in enumerate(pnl_series):
+        x = 10 + (i / (n - 1) if n > 1 else 0) * (w - 20)
+        y = to_y(v)
+        pts.append(x)
+        pts.append(y)
+
+    if len(pts) >= 4:
+        color = GREEN if display_pnl >= 0 else RED
+        canvas.create_line(*pts, fill=color, width=2)
+        
+        # Fill under curve
+        fill_pts = [pts[0], to_y(0)] + pts + [pts[-1], to_y(0)]
+        canvas.create_polygon(*fill_pts, fill=color, stipple="gray25", outline="")
+
+    # Stats Overlay
+    canvas.create_text(15, 15, text=f"STRATEGY PERFORMANCE",
+                       anchor="nw", font=FONT_BOLD, fill=CYAN)
+    canvas.create_text(w-15, 15, text=f"{display_pnl:+,.0f}",
+                       anchor="ne", font=FONT_BOLD, fill=TEXT)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # UPLOAD TAB
 # ══════════════════════════════════════════════════════════════════════════════
@@ -662,12 +746,18 @@ class UploadTab(ttk.Frame):
         self._prod_frame = tk.Frame(parent, bg=BG)
         self._prod_frame.grid(row=3, column=0, sticky="ew", padx=28, pady=(8, 0))
 
+        # ── PnL Preview Canvas ────────────────────────────────────────────────
+        self._preview_canvas = tk.Canvas(parent, bg=PANEL2, height=140,
+                                          highlightthickness=0)
+        self._preview_canvas.grid(row=4, column=0, sticky="ew", padx=28, pady=(16, 0))
+        self._preview_canvas.bind("<Configure>", lambda _: self._refresh_cards())
+
         # ── Divider ───────────────────────────────────────────────────────────
-        sep(parent).grid(row=4, column=0, sticky="ew", padx=28, pady=20)
+        sep(parent).grid(row=5, column=0, sticky="ew", padx=28, pady=20)
 
         # ── Form fields ───────────────────────────────────────────────────────
         form = tk.Frame(parent, bg=BG)
-        form.grid(row=5, column=0, sticky="ew", padx=28, pady=0)
+        form.grid(row=6, column=0, sticky="ew", padx=28, pady=0)
         form.columnconfigure(0, weight=1)
         form.columnconfigure(1, weight=1)
 
@@ -681,19 +771,19 @@ class UploadTab(ttk.Frame):
 
         # Notes
         tk.Label(parent, text="NOTES  (optional)", font=FONT_MONO2,
-                 bg=BG, fg=TEXT2).grid(row=6, column=0, sticky="w",
+                 bg=BG, fg=TEXT2).grid(row=7, column=0, sticky="w",
                                         padx=28, pady=(4, 4))
         self._notes = tk.Text(parent, height=4, bg=PANEL2, fg=TEXT,
                                insertbackground=CYAN, font=FONT_MONO, relief="flat",
                                highlightthickness=1, highlightbackground=BORDER,
                                highlightcolor=CYAN_DIM, padx=10, pady=8)
-        self._notes.grid(row=7, column=0, sticky="ew", padx=28)
+        self._notes.grid(row=8, column=0, sticky="ew", padx=28)
 
         # ── Action row ────────────────────────────────────────────────────────
-        sep(parent).grid(row=8, column=0, sticky="ew", padx=28, pady=20)
+        sep(parent).grid(row=9, column=0, sticky="ew", padx=28, pady=20)
 
         action = tk.Frame(parent, bg=BG)
-        action.grid(row=9, column=0, sticky="ew", padx=28, pady=(0, 28))
+        action.grid(row=10, column=0, sticky="ew", padx=28, pady=(0, 28))
         action.columnconfigure(0, weight=1)
 
         self._status_var = tk.StringVar(value="Select a zip to begin.")
@@ -735,6 +825,9 @@ class UploadTab(ttk.Frame):
         self._card_dd.set(f"{m['max_drawdown_pct']:.2f}%", RED if m["max_drawdown_pct"] > 5 else GOLD)
         self._card_trades.set(str(m["submission_trades"]), CYAN)
 
+        _draw_pnl_on_canvas(self._preview_canvas, m.get("pnl_series", []), 
+                           final_pnl=m.get("total_pnl"))
+
         for w in self._prod_frame.winfo_children():
             w.destroy()
 
@@ -751,6 +844,7 @@ class UploadTab(ttk.Frame):
     def _reset_cards(self):
         for c in [self._card_pnl, self._card_sharpe, self._card_dd, self._card_trades]:
             c.set("—", TEXT2)
+        _draw_pnl_on_canvas(self._preview_canvas, [])
         for w in self._prod_frame.winfo_children():
             w.destroy()
 
@@ -840,6 +934,46 @@ _SORT_KEYS: dict[str, tuple] = {
     "Date":      ("uploaded_at",),
 }
 _LOWER_IS_BETTER = {"Max DD %"}
+
+
+def _get_pnl_series(record: dict) -> list[float]:
+    """Helper to extract PnL series from record, with fallback for older runs."""
+    m = record.get("metrics", {})
+    if m.get("pnl_series"):
+        return m["pnl_series"]
+    
+    # Fallback 1: graphLog (timestamp;value)
+    cfg = record.get("config", {})
+    gl = cfg.get("graphLog", "")
+    if gl and isinstance(gl, str):
+        try:
+            lines = gl.replace("\\n", "\n").strip().split("\n")
+            if len(lines) > 1:
+                series = []
+                for line in lines[1:]:
+                    parts = line.split(";")
+                    if len(parts) >= 2:
+                        series.append(float(parts[1]))
+                if series: return series
+        except Exception:
+            pass
+
+    # Fallback 2: activitiesLog (full csv)
+    al = cfg.get("activitiesLog", "")
+    if al and isinstance(al, str):
+        try:
+            rows = _parse_activities_csv(al)
+            ts_pnl: dict[int, float] = {}
+            for r in rows:
+                ts = int(_safe_float(r.get("timestamp", 0)))
+                pnl = _safe_float(r.get("profit_and_loss", 0))
+                ts_pnl[ts] = ts_pnl.get(ts, 0) + pnl
+            if ts_pnl:
+                return [ts_pnl[t] for t in sorted(ts_pnl.keys())]
+        except Exception:
+            pass
+            
+    return []
 
 
 class LeaderboardTab(ttk.Frame):
@@ -959,12 +1093,18 @@ class LeaderboardTab(ttk.Frame):
         # ── Detail panel (bottom) ─────────────────────────────────────────────
         self._detail = tk.Frame(self, bg=PANEL, height=0)
         self._detail.grid(row=5, column=0, sticky="ew", padx=28, pady=(8, 0))
-        self._detail.columnconfigure(0, weight=1)
+        self._detail.columnconfigure(0, weight=2)
+        self._detail.columnconfigure(1, weight=3)
         self._detail_visible = False
         self._detail_lbl = tk.Label(self._detail, text="", font=FONT_MONO,
                                      bg=PANEL, fg=TEXT, anchor="w", justify="left",
-                                     wraplength=900)
-        self._detail_lbl.grid(row=0, column=0, sticky="ew", padx=14, pady=10)
+                                     wraplength=400)
+        self._detail_lbl.grid(row=0, column=0, sticky="nsew", padx=14, pady=10)
+
+        self._detail_canvas = tk.Canvas(self._detail, bg=PANEL2, height=120,
+                                         highlightthickness=0)
+        self._detail_canvas.grid(row=0, column=1, sticky="nsew", padx=(0, 14), pady=10)
+        self._detail_canvas.bind("<Configure>", lambda _: self._on_select()) # Redraw on resize
 
         # ── Status ────────────────────────────────────────────────────────────
         self._lb_status = tk.StringVar(value="Click ⟳ Refresh to load records.")
@@ -1189,25 +1329,25 @@ class LeaderboardTab(ttk.Frame):
             return
         m = record.get("metrics", {})
         lines = [
-            f"  RUN  {record.get('run_id', '—')}   "
-            f"Author: {record.get('author', '—')}   "
-            f"Strategy: {record.get('strategy_name', '—')}   "
-            f"Uploaded: {record.get('uploaded_at', '')[:19]}",
-            f"  PnL: {m.get('total_pnl',0):+,.4f}   "
-            f"Sharpe: {m.get('sharpe',0):.6f}   "
-            f"MaxDD: {m.get('max_drawdown_pct',0):.4f}%   "
-            f"Trades: {m.get('total_trades',0)}   "
-            f"SubTrades: {m.get('submission_trades',0)}   "
-            f"SubVol: {m.get('submission_volume',0):,}",
+            f"  RUN  {record.get('run_id', '—')}",
+            f"  Author: {record.get('author', '—')}",
+            f"  Strategy: {record.get('strategy_name', '—')}",
+            f"  Uploaded: {record.get('uploaded_at', '')[:19]}",
+            f"  PnL: {m.get('total_pnl',0):+,.4f}",
+            f"  Sharpe: {m.get('sharpe',0):.6f}",
+            f"  MaxDD: {m.get('max_drawdown_pct',0):.4f}%",
+            f"  SubTrades: {m.get('submission_trades',0)}",
         ]
         if m.get("per_product_pnl"):
-            pp = "  per-product →  " + "   ".join(
-                f"{k}: {v:+,.2f}" for k, v in sorted(m["per_product_pnl"].items()))
+            pp = "  per-product → " + ", ".join(
+                f"{k}:{v:+,.0f}" for k, v in sorted(m["per_product_pnl"].items()))
             lines.append(pp)
         if record.get("notes"):
             lines.append(f"  Notes: {record['notes']}")
+        
         self._detail_lbl.configure(text="\n".join(lines))
-        self._detail.configure(height=len(lines) * 18 + 20)
+        _draw_pnl_on_canvas(self._detail_canvas, _get_pnl_series(record),
+                           final_pnl=m.get("total_pnl"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1247,6 +1387,8 @@ class SettingsTab(ttk.Frame):
         shortcuts = [
             ("Ctrl+U", "Switch to Upload tab"),
             ("Ctrl+L", "Switch to Leaderboard tab"),
+            ("Ctrl+R", "Refresh Leaderboard data"),
+            ("Ctrl+Enter", "Upload Run (when on Upload tab)"),
         ]
         tk.Label(info, text="KEYBOARD SHORTCUTS", font=FONT_MONO2,
                  bg=BG, fg=TEXT2).grid(row=len(lines)+1, column=0, columnspan=2,
@@ -1311,6 +1453,13 @@ class App(tk.Tk):
         # Keyboard shortcut
         self.bind("<Control-l>", lambda _: self._nb.select(1))
         self.bind("<Control-u>", lambda _: self._nb.select(0))
+        self.bind("<Control-r>", lambda _: self._lb_tab.refresh())
+        self.bind("<Control-Return>", lambda _: self._on_ctrl_enter())
+
+    def _on_ctrl_enter(self):
+        # If on Upload tab, trigger upload
+        if self._nb.index("current") == 0:
+            self._upload_tab._start_upload()
 
     # ─── Shared state ─────────────────────────────────────────────────────────
 
@@ -1338,4 +1487,3 @@ class App(tk.Tk):
 if __name__ == "__main__":
     app = App()
     app.mainloop()
-

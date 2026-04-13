@@ -1,14 +1,10 @@
-Refactor code for modularity of strategies
-
-Mix Log viz and data viz
-
 Linear combination of data, or just a quick way to plot anything, in post process
 
 Current tomatoes strategy placed orders based on market making, with a skewed order placement based on avellanada stoikov model
 
 - option to tag trades by strategy, for bifurication in debugging
 
-
+2 panes to overlay any data in main market view.
 
 Strategy Ideas:
 
@@ -16,3 +12,5 @@ Strategy Ideas:
 
 
 Make tool for easily storing strategie, with performance, and sync with google sheets or smtg.
+
+
