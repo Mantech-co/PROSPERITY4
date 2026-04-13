@@ -588,7 +588,7 @@ class LogVisualizer(QMainWindow):
             is_b = str(tr.get('buyer','')).upper()=='SUBMISSION'; is_s = str(tr.get('seller','')).upper()=='SUBMISSION'
             if not is_b and not is_s: continue
             sym, qty, ts = tr.get('symbol',''), tr.get('quantity',0), tr.get('timestamp',0)
-            pts = ts + (tr.get('day',0) - min_day)*1000000 if 'day' in tr and not cont_ts else ts
+            pts = ts + tr.get('day',0)*1000000 if 'day' in tr and not cont_ts else ts
             pos_by_sym.setdefault(sym, []).append((tr.get('day', ts//1000000), pts, qty if is_b else -qty))
         for i, sym in enumerate(sorted(pos_by_sym.keys())):
             events = sorted(pos_by_sym[sym], key=lambda x: x[1]); ts_list, pos_list, cum, last_day = [], [], 0, events[0][0]
@@ -604,7 +604,7 @@ class LogVisualizer(QMainWindow):
         try:
             if day != 'All': self.current_df = self.current_df.filter(pl.col('day') == int(day))
         except: pass
-        cont_ts = self.data.get('_continuous_ts', False); min_day = self.data['prices_df']['day'].min() if 'day' in self.data else 0
+        cont_ts = self.data.get('_continuous_ts', False); min_day = self.data['prices_df']['day'].min() if 'day' in self.data['prices_df'].columns else 0
         t = self.current_df['timestamp'].to_numpy()
         if day == 'All' and 'day' in self.current_df.columns and not cont_ts: t = t + (self.current_df['day'].to_numpy() - min_day) * 1000000
         mid = self.current_df['mid_price'].to_numpy(); self.curve_mid.setData(t, mid)
@@ -615,7 +615,7 @@ class LogVisualizer(QMainWindow):
         for tr in self.data['trades']:
             if tr.get('symbol') != prod: continue
             ts = tr.get('timestamp', 0)
-            if day == 'All' and 'day' in tr and not cont_ts: ts += (tr['day'] - min_day) * 1000000
+            if day == 'All' and 'day' in tr and not cont_ts: ts += tr['day'] * 1000000
             is_b = str(tr.get('buyer','')).upper()=='SUBMISSION'; is_s = str(tr.get('seller','')).upper()=='SUBMISSION'
             if is_b: mb_t.append(ts); mb_p.append(tr['price'])
             elif is_s: ms_t.append(ts); ms_p.append(tr['price'])
@@ -675,7 +675,7 @@ class LogVisualizer(QMainWindow):
         if not self.data: return
         p, d, df = self.cb_dash_prod.currentText(), self.cb_day.currentText(), self.data['prices_df']
         if p != 'Overall': df = df.filter(pl.col('product') == p)
-        cont_ts = self.data.get('_continuous_ts', False); min_day = self.data['prices_df']['day'].min() if 'day' in self.data else 0
+        cont_ts = self.data.get('_continuous_ts', False); min_day = self.data['prices_df']['day'].min() if 'day' in self.data['prices_df'].columns else 0
         t_col = 'cts' if (d=='All' and 'day' in df.columns and not cont_ts) else 'timestamp'
         if t_col == 'cts': df = df.with_columns((pl.col('timestamp') + (pl.col('day') - min_day) * 1000000).alias(t_col))
         df = df.sort(t_col); agg = df.group_by(t_col).agg(pl.col('profit_and_loss').sum().alias('pnl')).sort(t_col)
