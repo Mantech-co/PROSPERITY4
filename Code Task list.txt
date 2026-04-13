@@ -7,3 +7,12 @@ Linear combination of data, or just a quick way to plot anything, in post proces
 Current tomatoes strategy placed orders based on market making, with a skewed order placement based on avellanada stoikov model
 
 - option to tag trades by strategy, for bifurication in debugging
+
+
+
+Strategy Ideas:
+
+- Predict little momentum based on previous price action, and build/nett position accordingly
+
+
+Make tool for easily storing strategie, with performance, and sync with google sheets or smtg.

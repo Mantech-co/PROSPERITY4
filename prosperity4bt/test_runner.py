@@ -134,14 +134,43 @@ class TestRunner:
         sandbox_log_lines = []
         for product in data.products:
             product_orders = orders.get(product, [])
+            if not product_orders:
+                continue
             product_position = state.position.get(product, 0)
+            limit = LIMITS[product]
 
-            total_long = sum(order.quantity for order in product_orders if order.quantity > 0)
-            total_short = sum(abs(order.quantity) for order in product_orders if order.quantity < 0)
+            # --- Clip buy orders ---
+            # Sort by price descending (most aggressive first) so we keep the best bids
+            buy_orders = sorted([o for o in product_orders if o.quantity > 0], key=lambda o: o.price, reverse=True)
+            buy_capacity = max(0, limit - product_position)  # how many units we can still buy
+            for order in buy_orders:
+                if order.quantity > buy_capacity:
+                    if buy_capacity == 0:
+                        product_orders.remove(order)
+                        sandbox_log_lines.append(f"Buy order for {product} @ {order.price} x{order.quantity} dropped (position limit {limit})")
+                    else:
+                        sandbox_log_lines.append(f"Buy order for {product} @ {order.price} clipped from {order.quantity} to {buy_capacity} (position limit {limit})")
+                        order.quantity = buy_capacity
+                        buy_capacity = 0
+                else:
+                    buy_capacity -= order.quantity
 
-            if product_position + total_long > LIMITS[product] or product_position - total_short < -LIMITS[product]:
-                sandbox_log_lines.append(f"Orders for product {product} exceeded limit of {LIMITS[product]} set")
-                orders.pop(product)
+            # --- Clip sell orders ---
+            # Sort by price ascending (most aggressive first) so we keep the best asks
+            sell_orders = sorted([o for o in product_orders if o.quantity < 0], key=lambda o: o.price)
+            sell_capacity = max(0, limit + product_position)  # how many units we can still sell
+            for order in sell_orders:
+                sell_qty = abs(order.quantity)
+                if sell_qty > sell_capacity:
+                    if sell_capacity == 0:
+                        product_orders.remove(order)
+                        sandbox_log_lines.append(f"Sell order for {product} @ {order.price} x{sell_qty} dropped (position limit {limit})")
+                    else:
+                        sandbox_log_lines.append(f"Sell order for {product} @ {order.price} clipped from {sell_qty} to {sell_capacity} (position limit {limit})")
+                        order.quantity = -sell_capacity
+                        sell_capacity = 0
+                else:
+                    sell_capacity -= sell_qty
 
         if len(sandbox_log_lines) > 0:
             sandbox_row.sandbox_log += "\n" + "\n".join(sandbox_log_lines)

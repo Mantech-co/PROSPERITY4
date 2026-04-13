@@ -1,0 +1,11 @@
+numpy
+pandas
+polars
+PyQt6
+pyqtgraph
+matplotlib
+plotly
+typer
+tqdm
+jsonpickle
+orjson

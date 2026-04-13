@@ -484,11 +484,12 @@ class LogVisualizer(QMainWindow):
         
         self.tabs.addTab(market_container, "Market View")
         self.p_m = self.gw_m.addPlot(); self.p_m.showGrid(x=True, y=True, alpha=0.3)
+        self.p_m.setDownsampling(auto=True, mode='peak')
         
         self.img_item = pg.ImageItem(); self.img_item.setZValue(0); self.p_m.addItem(self.img_item)
         self.img_orders = pg.ImageItem(); self.img_orders.setZValue(1); self.p_m.addItem(self.img_orders)
         self.img_orders.setVisible(False)
-        self.curve_mid = self.p_m.plot(pen=pg.mkPen(ACCENT_CYAN, width=2), name="Mid Price")
+        self.curve_mid = self.p_m.plot(pen=pg.mkPen(ACCENT_CYAN, width=2), name="Mid Price", clipToView=True)
         self.sc_bot = pg.ScatterPlotItem(symbol='x', size=7, brush=ACCENT_WHITE, name="Bot Trades")
         self.sc_buy = pg.ScatterPlotItem(symbol='t1', size=10, brush=ACCENT_GREEN, name="My Buy")
         self.sc_sell = pg.ScatterPlotItem(symbol='t', size=10, brush=ACCENT_RED, name="My Sell")
@@ -532,12 +533,14 @@ class LogVisualizer(QMainWindow):
         self.tabs.addTab(pnl_container, "PnL")
         
         self.p_pnl = self.gw_p.addPlot(); self.p_pnl.showGrid(x=True, y=True, alpha=0.3)
-        self.curve_pnl = self.p_pnl.plot(pen=pg.mkPen(ACCENT_GREEN, width=2))
+        self.p_pnl.setDownsampling(auto=True, mode='peak')
+        self.curve_pnl = self.p_pnl.plot(pen=pg.mkPen(ACCENT_GREEN, width=2), clipToView=True)
 
         self.gw_pos = pg.GraphicsLayoutWidget(); self.gw_pos.setBackground(BG)
         self.tabs.addTab(self.gw_pos, "Position")
         self.p_pos = self.gw_pos.addPlot(title="Position vs Timestamp")
         self.p_pos.showGrid(x=True, y=True, alpha=0.3)
+        self.p_pos.setDownsampling(auto=True, mode='peak')
         self.p_pos.addLegend()
         self.p_pos.setLabel('left', 'Position'); self.p_pos.setLabel('bottom', 'Timestamp')
         self.pos_curves = {}
@@ -583,6 +586,7 @@ class LogVisualizer(QMainWindow):
         QShortcut(QKeySequence("X"), self).activated.connect(lambda: self._set_zoom("x"))
         QShortcut(QKeySequence("Y"), self).activated.connect(lambda: self._set_zoom("y"))
         QShortcut(QKeySequence("Z"), self).activated.connect(lambda: self._set_zoom("xy"))
+        QShortcut(QKeySequence("A"), self).activated.connect(self._autoscale_all)
 
         # SandboxLog Tab
         self._build_sandbox_tab()
@@ -645,7 +649,8 @@ class LogVisualizer(QMainWindow):
         self.gw_dash_pnl.setFixedHeight(300)
         self.p_dash_pnl = self.gw_dash_pnl.addPlot(title="Cumulative PnL")
         self.p_dash_pnl.showGrid(x=True, y=True, alpha=0.3)
-        self.curve_dash_pnl = self.p_dash_pnl.plot(pen=pg.mkPen(ACCENT_GREEN, width=2))
+        self.p_dash_pnl.setDownsampling(auto=True, mode='peak')
+        self.curve_dash_pnl = self.p_dash_pnl.plot(pen=pg.mkPen(ACCENT_GREEN, width=2), clipToView=True)
         scroll_layout.addWidget(self.gw_dash_pnl)
 
         # Drawdown 
@@ -664,8 +669,9 @@ class LogVisualizer(QMainWindow):
         self.gw_dash_dd.setFixedHeight(300)
         self.p_dash_dd = self.gw_dash_dd.addPlot(title="Drawdown")
         self.p_dash_dd.showGrid(x=True, y=True, alpha=0.3)
+        self.p_dash_dd.setDownsampling(auto=True, mode='peak')
         self.p_dash_dd.setXLink(self.p_dash_pnl)
-        self.curve_dash_dd = self.p_dash_dd.plot(pen=pg.mkPen(ACCENT_RED, width=2, fillLevel=0, brush=(255, 61, 90, 50)))
+        self.curve_dash_dd = self.p_dash_dd.plot(pen=pg.mkPen(ACCENT_RED, width=2, fillLevel=0, brush=(255, 61, 90, 50)), clipToView=True)
         dd_layout.addWidget(self.gw_dash_dd)
         
         scroll_layout.addWidget(dd_container)
@@ -793,6 +799,20 @@ class LogVisualizer(QMainWindow):
     def _set_zoom(self, mode):
         self.lbl_zoom.setText(f"Mode: {mode.upper()}")
         self.p_m.setMouseEnabled(x=(mode in ['x', 'xy']), y=(mode in ['y', 'xy']))
+
+    def _autoscale_all(self):
+        plots = [self.p_m, self.p_pnl, self.p_pos]
+        if hasattr(self, 'p_dash_pnl'): plots.append(self.p_dash_pnl)
+        if hasattr(self, 'p_dash_dd'): plots.append(self.p_dash_dd)
+        
+        # Add custom plots from gw_c
+        for item in self.gw_c.ci.items:
+            if isinstance(item, pg.PlotItem):
+                plots.append(item)
+        
+        for p in plots:
+            if p:
+                p.autoRange()
 
     def _open_dialog(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Log", "", "Log (*.log *.json)")
@@ -1004,12 +1024,17 @@ class LogVisualizer(QMainWindow):
         pos_state = {}
         sorted_trades = sorted(
             [t for t in trades if str(t.get('buyer', '')).upper() == 'SUBMISSION' or str(t.get('seller', '')).upper() == 'SUBMISSION'],
-            key=lambda t: t.get('timestamp', 0)
+            key=lambda t: (t.get('day', 0), t.get('timestamp', 0))
         )
         for tr in sorted_trades:
             sym = tr.get('symbol', '')
             is_buy = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
-            delta = tr.get('quantity', 0) if is_buy else -tr.get('quantity', 0)
+            is_sell = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+            qty = tr.get('quantity', 0)
+            delta = 0
+            if is_buy: delta += qty
+            if is_sell: delta -= qty
+            
             pos_state[sym] = pos_state.get(sym, 0) + delta
             pos_at[(sym, tr['timestamp'])] = pos_state[sym]
 
@@ -1084,9 +1109,10 @@ class LogVisualizer(QMainWindow):
         anchor = None
         for i, (name, pts) in enumerate(custom.items()):
             p = self.gw_c.addPlot(row=i, col=0, title=name)
+            p.setDownsampling(auto=True, mode='peak')
             if anchor: p.setXLink(anchor)
             else: anchor = p
-            p.plot([x[0] for x in pts], [x[1] for x in pts], pen=pg.mkPen(CUSTOM_COLORS[i % len(CUSTOM_COLORS)], width=2))
+            p.plot([x[0] for x in pts], [x[1] for x in pts], pen=pg.mkPen(CUSTOM_COLORS[i % len(CUSTOM_COLORS)], width=2), clipToView=True)
 
     def _build_position_plot(self):
         # Clear old curves
@@ -1098,8 +1124,15 @@ class LogVisualizer(QMainWindow):
         if not trades:
             return
 
-        # Group self-trades by symbol
-        pos_by_sym = {}  # symbol -> sorted list of (timestamp, delta)
+        # Group SUBMISSION trades by symbol
+        # key: (day_seg, ts, delta) where day_seg = ts // 1_000_000 for backtester logs
+        # or the explicit 'day' field for CSV imports.
+        # The backtester resets position to 0 at the start of each day, so we must
+        # detect day boundaries and reset the cumulative counter accordingly.
+        pos_by_sym = {}  # symbol -> sorted list of (day_seg, plot_ts, delta)
+        continuous_ts = self.data.get('_continuous_ts', False)
+        min_day = self.data['prices_df']['day'].min() if 'prices_df' in self.data and 'day' in self.data['prices_df'].columns else 0
+
         for tr in trades:
             is_buyer = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
             is_sell = str(tr.get('seller', '')).upper() == 'SUBMISSION'
@@ -1108,24 +1141,46 @@ class LogVisualizer(QMainWindow):
             sym = tr.get('symbol', '')
             qty = tr.get('quantity', 0)
             ts = tr.get('timestamp', 0)
+
+            # Compute plot timestamp (apply day offset for CSV imports where timestamps reset each day)
+            plot_ts = ts
+            if 'day' in tr and not continuous_ts:
+                plot_ts = ts + (tr['day'] - min_day) * 1_000_000
+
+            # Determine the day segment for day-boundary detection:
+            # - Backtester logs: no 'day' field; timestamps are pre-merged with 1M offsets → use plot_ts // 1_000_000
+            # - CSV imports: use the explicit 'day' field
             if 'day' in tr:
-                ts += tr['day'] * 1000000
-            delta = qty if is_buyer else -qty
-            pos_by_sym.setdefault(sym, []).append((ts, delta))
+                day_seg = tr['day']
+            else:
+                day_seg = plot_ts // 1_000_000
+
+            delta = 0
+            if is_buyer: delta += qty
+            if is_sell: delta -= qty
+
+            if delta != 0:
+                pos_by_sym.setdefault(sym, []).append((day_seg, plot_ts, delta))
 
         products = sorted(pos_by_sym.keys())
         colors = [ACCENT_CYAN, ACCENT_GREEN, ACCENT_RED, ACCENT_GOLD, ACCENT_PURPLE, ACCENT_WHITE] + CUSTOM_COLORS
 
         for i, sym in enumerate(products):
-            events = sorted(pos_by_sym[sym], key=lambda x: x[0])
+            # Sort by plot timestamp; day_seg used only for reset detection
+            events = sorted(pos_by_sym[sym], key=lambda x: x[1])
             ts_list, pos_list = [], []
             cum = 0
-            for ts, delta in events:
+            last_day_seg = events[0][0]
+            for day_seg, plot_ts, delta in events:
+                if day_seg != last_day_seg:
+                    # Day boundary: backtester resets position to 0
+                    cum = 0
+                    last_day_seg = day_seg
                 cum += delta
-                ts_list.append(ts)
+                ts_list.append(plot_ts)
                 pos_list.append(cum)
             pen = pg.mkPen(colors[i % len(colors)], width=2)
-            curve = self.p_pos.plot(ts_list, pos_list, pen=pen, name=sym, stepMode='right')
+            curve = self.p_pos.plot(ts_list, pos_list, pen=pen, name=sym, stepMode='right', clipToView=True)
             self.pos_curves[sym] = curve
 
         self.p_pos.autoRange()
@@ -1183,6 +1238,11 @@ class LogVisualizer(QMainWindow):
                     tr = prod_trades[trade_idx]
                     p, q = float(tr['price']), int(tr['quantity'])
                     is_buy = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+                    is_sell = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+                    
+                    if (not is_buy and not is_sell) or (is_buy and is_sell):
+                        trade_idx += 1
+                        continue
                     
                     if is_buy:
                         if pos >= 0: # adding to long
@@ -1299,7 +1359,7 @@ class LogVisualizer(QMainWindow):
             for i, (name, pts) in enumerate(custom_data.items()):
                 if name not in self.custom_curves:
                     color = CUSTOM_COLORS[i % len(CUSTOM_COLORS)]
-                    curve = self.p_m.plot(pen=pg.mkPen(color, width=1.5), name=f"[C] {name}")
+                    curve = self.p_m.plot(pen=pg.mkPen(color, width=1.5), name=f"[C] {name}", clipToView=True)
                     curve.setVisible(False)
                     self.custom_curves[name] = curve
                     self.leg_m.addItem(curve, f"[C] {name}")
@@ -1355,6 +1415,9 @@ class LogVisualizer(QMainWindow):
 
             my_trades_cnt += 1
             volume_traded += qty
+            
+            if is_buyer and is_seller:
+                continue
             
             p_pos = pos_map.get(sym, 0)
             p_cost = cost_map.get(sym, 0.0)
@@ -1444,9 +1507,32 @@ class LogVisualizer(QMainWindow):
         self.p_dash_dd.autoRange()
 
 def _auto_detect_log(script_dir: str):
-    """Return path if exactly one .log file exists next to the script, else None."""
-    logs = [f for f in os.listdir(script_dir) if f.endswith('.log')]
-    return os.path.join(script_dir, logs[0]) if len(logs) == 1 else None
+    """Return path to the most recent .log file in backtests/ or the current directory."""
+    search_dirs = [script_dir]
+    # Check for backtests directory relative to the script's parent (assuming it's in a subfolder like 'logviz')
+    project_root = os.path.dirname(script_dir)
+    backtests_dir = os.path.join(project_root, 'backtests')
+    if os.path.isdir(backtests_dir):
+        search_dirs.append(backtests_dir)
+    
+    # Also check if backtests is in the current directory
+    cwd_backtests = os.path.join(os.getcwd(), 'backtests')
+    if os.path.isdir(cwd_backtests) and cwd_backtests not in search_dirs:
+        search_dirs.append(cwd_backtests)
+
+    all_logs = []
+    for d in search_dirs:
+        try:
+            for f in os.listdir(d):
+                if f.endswith('.log'):
+                    all_logs.append(os.path.join(d, f))
+        except OSError:
+            continue
+            
+    if not all_logs:
+        return None
+        
+    return max(all_logs, key=os.path.getmtime)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
