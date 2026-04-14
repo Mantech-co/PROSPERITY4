@@ -26,7 +26,7 @@ if __name__ == "__main__":
     try:
         run_backtest(
             trader_class=Trader,
-            round_day=["0"], 
+            round_day=["1-0"], 
             print_output=False,
         )
         print("\nBacktest completed successfully.")

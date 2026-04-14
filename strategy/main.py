@@ -1,29 +1,17 @@
 import json
+import math
 from typing import List, Dict, Any, Optional, Tuple
 from datamodel import OrderDepth, TradingState, Order, Trade
 
 # ── Strategy Parameters ─────────────────────────────────────────────────────
 
-# --- Global Tuning ---
 TUNING_PARAMS = {
-    "alpha": 0.5,
-    "n_sma": 20,
-    "m_slope": 30,
-    "slope_threshold": 0.2,
+    "osmium_z_threshold": 2.0,
+    "osmium_z_window": 20,
+    "osmium_mm_limit": 16,  # 20% of 80
     "wall_inertia": 0.5,
-    "liq_threshold": 60
+    "position_limit": 80
 }
-
-# --- Emeralds Strategy Defaults ---
-EMERALD_LIMIT    = 80
-
-# --- Tomatoes Strategy Defaults ---
-TOMATO_LIMIT           = 80
-TOMATO_ALPHA           = 0.5
-TOMATO_N_SMA           = 20
-TOMATO_M_SLOPE         = 30
-TOMATO_SLOPE_THRESHOLD = 0.2
-TOMATO_AVG_UNITS       = 5.0
 
 class Logger:
     """Logger with order-level trade attribution."""
@@ -64,106 +52,15 @@ class Logger:
         self._buffer.clear()
         return out
 
-class MidPriceHelper:
-    """Utility class for various mid-price calculations."""
-    
-    @staticmethod
-    def get_vwap(order_depth: OrderDepth) -> Optional[float]:
-        total_vol = 0
-        total_val = 0
-        for bp, bv in order_depth.buy_orders.items():
-            total_val += bp * bv
-            total_vol += bv
-        for sp, sv in order_depth.sell_orders.items():
-            total_val += sp * abs(sv)
-            total_vol += abs(sv)
-        return total_val / total_vol if total_vol > 0 else None 
-
-    @staticmethod
-    def get_bba_mid(order_depth: OrderDepth) -> Optional[float]:
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-        return (best_bid + best_ask) / 2.0
-
-    @staticmethod
-    def get_pop(order_depth: OrderDepth) -> Optional[float]:
-        """Returns mid price based on most popular (highest volume) bid and ask."""
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-        pop_bid = max(order_depth.buy_orders.items(), key=lambda x: x[1])[0]
-        pop_ask = max(order_depth.sell_orders.items(), key=lambda x: abs(x[1]))[0]
-        return (pop_bid + pop_ask) / 2.0
-
-    @staticmethod
-    def get_wall_mid(bid_wall: Optional[float], ask_wall: Optional[float]) -> Optional[float]:
-        """Returns mid price based on inertial walls."""
-        if bid_wall is None or ask_wall is None:
-            return None
-        return (bid_wall + ask_wall) / 2.0
-
-class PositionManager:
-    """Manages FIFO inventory and state persistence."""
-    def __init__(self, product: str, state_dict: Dict[str, Any]):
-        self.product = product
-        self.inventory = state_dict.get("INVENTORY", {}).get(product, [])
-        key_suffix = "TOMATO" if product == "TOMATOES" else product
-        self.last_trade_time = state_dict.get(f"{key_suffix}_LAST_TRADE_TIME", -1)
-
-    def update(self, trades: List[Trade]):
-        for trade in trades:
-            if trade.timestamp <= self.last_trade_time:
-                continue
-            
-            trade_qty = trade.quantity if trade.buyer == "SUBMISSION" else -trade.quantity
-            
-            if not self.inventory or (self.inventory[0][0] * trade_qty >= 0):
-                self.inventory.append([trade_qty, trade.price])
-            else:
-                temp_qty = trade_qty
-                while temp_qty != 0 and self.inventory:
-                    if abs(temp_qty) >= abs(self.inventory[0][0]):
-                        temp_qty += self.inventory[0][0]
-                        self.inventory.pop(0)
-                    else:
-                        self.inventory[0][0] += temp_qty
-                        temp_qty = 0
-                if temp_qty != 0:
-                    self.inventory.append([temp_qty, trade.price])
-            
-            self.last_trade_time = max(self.last_trade_time, trade.timestamp)
-
-    def get_avg_price(self, n_units: float = 5.0) -> Optional[float]:
-        accumulated_units = 0.0
-        weighted_sum = 0.0
-        for layer_qty, layer_price in reversed(self.inventory):
-            needed = n_units - accumulated_units
-            contribution = min(abs(layer_qty), needed)
-            weighted_sum += contribution * layer_price
-            accumulated_units += contribution
-            if accumulated_units >= n_units:
-                break
-        return weighted_sum / accumulated_units if accumulated_units > 0 else None
-
-    def persist(self, state_dict: Dict[str, Any]):
-        if "INVENTORY" not in state_dict:
-            state_dict["INVENTORY"] = {}
-        state_dict["INVENTORY"][self.product] = self.inventory
-        key_suffix = "TOMATO" if self.product == "TOMATOES" else self.product
-        state_dict[f"{key_suffix}_LAST_TRADE_TIME"] = self.last_trade_time
-
 class BaseStrategy:
-    """Base class for all product strategies with real-time capacity tracking."""
+    """Base class for all product strategies."""
     PRODUCT = ""
     
     def __init__(self, logger: Logger, params: Dict[str, Any]):
-        """Called once at Trader init. Stores static config."""
         self.logger = logger
         self.params = params
-        self.limit = params.get("position_limit", 20)
+        self.limit = params.get("position_limit", 80)
         self.orders: List[Order] = []
-        # Per-tick state (set in reset)
         self.state: Optional[TradingState] = None
         self.order_depth: Optional[OrderDepth] = None
         self.current_pos = 0
@@ -171,7 +68,6 @@ class BaseStrategy:
         self.sell_capacity = 0
 
     def reset(self, state: TradingState):
-        """Called each tick to refresh per-tick state."""
         self.state = state
         self.order_depth = state.order_depths[self.PRODUCT]
         self.orders = []
@@ -180,7 +76,6 @@ class BaseStrategy:
         self.sell_capacity = self.limit + self.current_pos
 
     def bid(self, price: int, quantity: int, tag: str = "MAKE"):
-        """Place a bid, clamping to available buy capacity."""
         if quantity <= 0 or self.buy_capacity <= 0:
             return
         exec_qty = min(quantity, self.buy_capacity)
@@ -189,7 +84,6 @@ class BaseStrategy:
         self.logger.log_order(self.PRODUCT, "BUY", int(price), exec_qty, tag)
 
     def ask(self, price: int, quantity: int, tag: str = "MAKE"):
-        """Place an ask, clamping to available sell capacity."""
         if quantity <= 0 or self.sell_capacity <= 0:
             return
         exec_qty = min(quantity, self.sell_capacity)
@@ -197,295 +91,176 @@ class BaseStrategy:
         self.sell_capacity -= exec_qty
         self.logger.log_order(self.PRODUCT, "SELL", int(price), exec_qty, tag)
 
-    def update_inertial_walls(self, state_dict: Dict[str, Any]) -> Tuple[Optional[int], Optional[int]]:
-        """Calculates inertial walls using EMA + outlier filtering. Returns rounded values for execution.
-        
-        Algorithm:
-        1. Compute tentative wall = best_bid/ask * alpha + (1-alpha) * prev_wall
-        2. Remove orders that lie outside the tentative wall from consideration
-        3. Recalculate best bid/ask from remaining orders (no alpha) as final wall
-        """
+    def get_lr_prediction(self, history: List[float]) -> Optional[float]:
+        if len(history) < 3:
+            return None
+        # y_t = (4*y3 + y2 - 2*y1) / 3
+        return (4.0 * history[-1] + history[-2] - 2.0 * history[-3]) / 3.0
+
+    def update_inertial_walls(self, state_dict: Dict[str, Any], augment: bool = False) -> Tuple[Optional[float], Optional[float]]:
         prev_bid = state_dict.get(f"{self.PRODUCT}_INERTIAL_BID")
         prev_ask = state_dict.get(f"{self.PRODUCT}_INERTIAL_ASK")
-        alpha = self.params.get("wall_inertia", 0.7)
+        alpha = self.params.get("wall_inertia", 0.5)
 
-        buy_orders = self.order_depth.buy_orders   # {price: +vol}
-        sell_orders = self.order_depth.sell_orders  # {price: -vol}
+        buy_orders = self.order_depth.buy_orders
+        sell_orders = self.order_depth.sell_orders
 
-        # ── Bid Wall ──
+        # Bid Wall
         if not buy_orders:
-            inertial_bid = prev_bid  # No orders → keep previous
+            if augment:
+                history = state_dict.get(f"{self.PRODUCT}_BID_HIST", [])
+                inertial_bid = self.get_lr_prediction(history) or prev_bid
+            else:
+                inertial_bid = prev_bid
         else:
             best_bid = max(buy_orders.keys())
             if prev_bid is None:
-                inertial_bid = best_bid  # First tick init
+                inertial_bid = best_bid
             else:
-                # 1. Tentative wall via EMA
                 tentative_bid = best_bid * alpha + (1 - alpha) * prev_bid
-                self.logger.log(bid_wall_init=tentative_bid)
-                # 2. Filter out orders above the tentative wall (outliers)
-                filtered_bids = {p: v for p, v in buy_orders.items() if p < tentative_bid+1}
-                # 3. Recalculate best bid from remaining orders
-                if filtered_bids:
-                    inertial_bid = max(filtered_bids.keys())
-                else:
-                    inertial_bid = tentative_bid  # All filtered → use tentative
+                filtered_bids = {p: v for p, v in buy_orders.items() if p < tentative_bid + 1}
+                inertial_bid = max(filtered_bids.keys()) if filtered_bids else tentative_bid
 
-        # ── Ask Wall ──
+        # Ask Wall
         if not sell_orders:
-            inertial_ask = prev_ask  # No orders → keep previous
+            if augment:
+                history = state_dict.get(f"{self.PRODUCT}_ASK_HIST", [])
+                inertial_ask = self.get_lr_prediction(history) or prev_ask
+            else:
+                inertial_ask = prev_ask
         else:
             best_ask = min(sell_orders.keys())
             if prev_ask is None:
-                inertial_ask = best_ask  # First tick init
+                inertial_ask = best_ask
             else:
-                # 1. Tentative wall via EMA
                 tentative_ask = best_ask * alpha + (1 - alpha) * prev_ask
-                self.logger.log(ask_wall_init=tentative_ask)
-                # 2. Filter out orders below the tentative wall (outliers)
-                filtered_asks = {p: v for p, v in sell_orders.items() if p > tentative_ask-1}
-                # 3. Recalculate best ask from remaining orders
-                if filtered_asks:
-                    inertial_ask = min(filtered_asks.keys())
-                else:
-                    inertial_ask = tentative_ask  # All filtered → use tentative
+                filtered_asks = {p: v for p, v in sell_orders.items() if p > tentative_ask - 1}
+                inertial_ask = min(filtered_asks.keys()) if filtered_asks else tentative_ask
 
-        # ── Persist and return ──
+        # Update History for LR
         if inertial_bid is not None:
+            bid_hist = state_dict.get(f"{self.PRODUCT}_BID_HIST", [])
+            bid_hist.append(inertial_bid)
+            if len(bid_hist) > 3: bid_hist.pop(0)
+            state_dict[f"{self.PRODUCT}_BID_HIST"] = bid_hist
             state_dict[f"{self.PRODUCT}_INERTIAL_BID"] = inertial_bid
+
         if inertial_ask is not None:
+            ask_hist = state_dict.get(f"{self.PRODUCT}_ASK_HIST", [])
+            ask_hist.append(inertial_ask)
+            if len(ask_hist) > 3: ask_hist.pop(0)
+            state_dict[f"{self.PRODUCT}_ASK_HIST"] = ask_hist
             state_dict[f"{self.PRODUCT}_INERTIAL_ASK"] = inertial_ask
 
-        rounded_bid = round(inertial_bid) if inertial_bid is not None else None
-        rounded_ask = round(inertial_ask) if inertial_ask is not None else None
-        self.logger.log(bid_wall=rounded_bid, ask_wall=rounded_ask)
-        return rounded_bid, rounded_ask
+        return inertial_bid, inertial_ask
+
+class OsmiumStrategy(BaseStrategy):
+    PRODUCT = "ASH_COATED_OSMIUM"
 
     def run(self, state_dict: Dict[str, Any]) -> List[Order]:
-        raise NotImplementedError
-
-class MarketMaker:
-    """Helper class to handle market making: taking (netting, fair-build, outlier removal) and making."""
-    
-    def __init__(self, aggression: float = 0.0, fair_build_ratio: float = 0.5, make: bool = True):
-        """Called once at strategy init.
-        
-        Args:
-            aggression: Max loss per order for outlier removal.
-                        0   = only take profitable orders (better than fair).
-                        > 0 = also take lossy outliers up to this loss budget.
-                        Loss formula: volume * max(0, deviation_from_fair).
-            fair_build_ratio: Max position as fraction of limit to allow fair-value building.
-                              e.g. 0.5 = build at fair only if |pos| < 50% of limit.
-            make: Whether to place maker orders (overbid/undercut).
-        """
-        self.aggression = aggression
-        self.fair_build_ratio = fair_build_ratio
-        self.make = make
-
-    def execute(self, strat: BaseStrategy, mid_target: float, bid_wall: Optional[int], ask_wall: Optional[int], liq_threshold: Optional[int] = None):
-        """Called each tick. Operates on the strategy's current per-tick state."""
-        if bid_wall is None or ask_wall is None:
-            return
-        
-        # Sort once, reuse for both taking and making
-        sorted_asks = sorted(strat.order_depth.sell_orders.items())
-        sorted_bids = sorted(strat.order_depth.buy_orders.items(), reverse=True)
-        low_pos = abs(strat.current_pos) < self.fair_build_ratio * strat.limit
-
-        # ── TAKING: Buy side (taking asks) ──
-        for sp, sv in sorted_asks:
-            vol = abs(sv)
-            if sp == mid_target:
-                # 1. Netting at fair (always, no risk)
-                if strat.current_pos < 0:
-                    strat.bid(sp, min(vol, abs(strat.current_pos)), tag="TAKE_NET")
-                # 2a. Build at fair (if position < 50% limit)
-                if low_pos:
-                    strat.bid(sp, vol, tag="TAKE_FAIR")
-            else:
-                # 2b. Outlier removal (gated by aggression)
-                # loss < 0 when sp < mid (profitable), loss > 0 when sp > mid (lossy)
-                loss = vol * max(0, sp - mid_target)
-                if loss <= self.aggression:
-                    strat.bid(sp, vol, tag="TAKE" if sp < mid_target else "TAKE_AGG")
-
-        # ── TAKING: Sell side (taking bids) ──
-        for bp, bv in sorted_bids:
-            vol = abs(bv)
-            if bp == mid_target:
-                # 1. Netting at fair (always, no risk)
-                if strat.current_pos > 0:
-                    strat.ask(bp, min(vol, abs(strat.current_pos)), tag="TAKE_NET")
-                # 2a. Build at fair (if position < 50% limit)
-                if low_pos:
-                    strat.ask(bp, vol, tag="TAKE_FAIR")
-            else:
-                # 2b. Outlier removal (gated by aggression)
-                loss = vol * max(0, mid_target - bp)
-                if loss <= self.aggression:
-                    strat.ask(bp, vol, tag="TAKE" if bp > mid_target else "TAKE_AGG")
-
-        # ── MAKING ──
-        if not self.make:
-            return
-
-
-        bid_price = bid_wall + (1 if bid_wall < mid_target else -1)
-        ask_price = ask_wall - (1 if ask_wall > mid_target else -1)
-        
-        if liq_threshold is not None:
-            if strat.current_pos > liq_threshold:
-                # Liquidate long: ask at fair value
-                ask_price = mid_target
-            elif strat.current_pos < -liq_threshold:
-                # Liquidate short: bid at fair value
-                bid_price = mid_target
-
-        
-        if bid_price <= mid_target:
-            strat.bid(bid_price, strat.buy_capacity)
-                
-        if ask_price >= mid_target:
-            strat.ask(ask_price, strat.sell_capacity)
-
-class EmeraldStrategy(BaseStrategy):
-    """Strategy for EMERALDS: Pure Market Making around 10000."""
-    PRODUCT = "EMERALDS"
-    
-    def __init__(self, logger: Logger, params: Dict[str, Any]):
-        super().__init__(logger, params)
-        self.mm = MarketMaker()
-    
-    def run(self, state_dict: Dict[str, Any]) -> List[Order]:
-        bid_wall, ask_wall = self.update_inertial_walls(state_dict)
-        self.mm.execute(self, 10000, bid_wall, ask_wall)
-        return self.orders
-
-class TomatoStrategy(BaseStrategy):
-    """Strategy for TOMATOES: Trend following + Market Making with Inventory Filtering."""
-    PRODUCT = "TOMATOES"
-    
-    def __init__(self, logger: Logger, params: Dict[str, Any]):
-        super().__init__(logger, params)
-        self.mm = MarketMaker()
-    
-    def run(self, state_dict: Dict[str, Any]) -> List[Order]:
-        # 0. Get Inertial Walls → fair price is their midpoint
-        bid_wall, ask_wall = self.update_inertial_walls(state_dict)
+        bid_wall, ask_wall = self.update_inertial_walls(state_dict, augment=True)
         if bid_wall is None or ask_wall is None:
             return []
 
-        # 1. Fair price from inertial walls (already smoothed)
-        mid_price_target = round((bid_wall + ask_wall) / 2.0)
+        mid_price = (bid_wall + ask_wall) / 2.0
+        
+        # Z-Score Calculation
+        window = self.params.get("osmium_z_window", 20)
+        prices = state_dict.get("OSMIUM_PRICES", [])
+        prices.append(mid_price)
+        if len(prices) > window:
+            prices.pop(0)
+        state_dict["OSMIUM_PRICES"] = prices
 
-        # 2. SMA and Slope
-        n_sma = self.params["n_sma"]
-        m_slope = self.params["m_slope"]
-        slope_threshold = self.params["slope_threshold"]
-        
-        tomato_prices = state_dict.get("TOMATO_PRICES", [])
-        tomato_prices.append(mid_price_target)
-        if len(tomato_prices) > n_sma:
-            tomato_prices.pop(0)
-        state_dict["TOMATO_PRICES"] = tomato_prices
-        
-        current_sma = sum(tomato_prices) / len(tomato_prices)
-        tomato_smas = state_dict.get("TOMATO_SMAS", [])
-        tomato_smas.append(current_sma)
-        if len(tomato_smas) > m_slope:
-            tomato_smas.pop(0)
-        state_dict["TOMATO_SMAS"] = tomato_smas
-        
-        slope = 0
-        if len(tomato_smas) == m_slope:
-            slope = (tomato_smas[-1] - tomato_smas[0]) / (m_slope - 1)
+        if len(prices) >= window:
+            mean = sum(prices) / len(prices)
+            variance = sum((x - mean) ** 2 for x in prices) / len(prices)
+            std = math.sqrt(variance) if variance > 0 else 1e-6
+            z_score = (mid_price - mean) / std
             
-        # self.logger.log(mid_price=mid_price_target, vwap=vwap, sma=current_sma, slope=4940 + 10*slope)
+            threshold = self.params.get("osmium_z_threshold", 2.0)
+            
+            # Directional component
+            if z_score > threshold:
+                # Overpriced -> Short
+                target_pos = -self.limit
+                if self.current_pos > target_pos:
+                    # Take bids
+                    sorted_bids = sorted(self.order_depth.buy_orders.items(), reverse=True)
+                    for bp, bv in sorted_bids:
+                        if self.current_pos <= target_pos: break
+                        vol = min(abs(bv), self.current_pos - target_pos)
+                        self.ask(bp, vol, tag="Z_TAKE_BID")
+            elif z_score < -threshold:
+                # Underpriced -> Long
+                target_pos = self.limit
+                if self.current_pos < target_pos:
+                    # Take asks
+                    sorted_asks = sorted(self.order_depth.sell_orders.items())
+                    for sp, sv in sorted_asks:
+                        if self.current_pos >= target_pos: break
+                        vol = min(abs(sv), target_pos - self.current_pos)
+                        self.bid(sp, vol, tag="Z_TAKE_ASK")
 
-        # 3. Position and Inventory Manager
-        pos_mgr = PositionManager(self.PRODUCT, state_dict)
-        pos_mgr.update(self.state.own_trades.get(self.PRODUCT, []))
-        avg_price = pos_mgr.get_avg_price(self.params.get("inventory_avg_units", 5.0))
-        pos_mgr.persist(state_dict)
+        # Market Making component (20% of limit)
+        mm_limit = self.params.get("osmium_mm_limit", 16)
+        # Place orders around mid-price
+        # Overbid bid_wall if possible, underbid ask_wall
+        mm_bid = round(bid_wall)
+        mm_ask = round(ask_wall)
+        
+        # We cap MM orders to mm_limit
+        self.bid(mm_bid, mm_limit, tag="MM_BID")
+        self.ask(mm_ask, mm_limit, tag="MM_ASK")
 
-        # 4. Order Generation
-        liq_threshold = self.params.get("liq_threshold")
-        self.mm.execute(self, mid_price_target, bid_wall, ask_wall, liq_threshold=liq_threshold)
+        return self.orders
 
-        # # 5. Trend Filter
-        # if abs(slope) > slope_threshold:
-        #     if slope > 0: # Bullish
-        #         self.orders = [o for o in self.orders if o.quantity > 0]
-        #     elif slope < 0: # Bearish
-        #         self.orders = [o for o in self.orders if o.quantity < 0]
+class PepperRootStrategy(BaseStrategy):
+    PRODUCT = "INTARIAN_PEPPER_ROOT"
 
-        # 6. Inventory Favourable Filter
-        # if avg_price is not None and len(pos_mgr.inventory) > 0:
-        #     pre_filter = len(self.orders)
-        #     is_long = pos_mgr.inventory[0][0] > 0
-        #     filtered = []
-        #     for o in self.orders:
-        #         if is_long and o.quantity < 0: # Selling out of a long
-        #             if o.price > avg_price:
-        #                 filtered.append(o)
-        #         elif not is_long and o.quantity > 0: # Buying back a short
-        #             if o.price < avg_price:
-        #                 filtered.append(o)
-        #         else:
-        #             filtered.append(o)
-        #     self.orders = filtered
-        #     removed = pre_filter - len(self.orders)
-        #     if removed > 0:
-        #         self.logger.log(orders_removed_avg=removed, avg_price=avg_price)
-
+    def run(self, state_dict: Dict[str, Any]) -> List[Order]:
+        bid_wall, ask_wall = self.update_inertial_walls(state_dict)
+        if bid_wall is None or ask_wall is None:
+            return []
+        
+        # Simple Market Maker for Pepper Root
+        mid = (bid_wall + ask_wall) / 2.0
+        self.bid(round(bid_wall), self.limit, tag="MM_BID")
+        self.ask(round(ask_wall), self.limit, tag="MM_ASK")
         return self.orders
 
 class Trader:
     def __init__(self):
         self.logger = Logger()
-
-        # Build param dicts once
-        # self.emerald_params = {
-        #     "position_limit": TUNING_PARAMS.get("position_limit", EMERALD_LIMIT),
-        #     "wall_inertia": TUNING_PARAMS.get("wall_inertia", 0.7)
-        # }
-        self.tomato_params = {
-            "alpha": TUNING_PARAMS.get("alpha", TOMATO_ALPHA),
-            "n_sma": TUNING_PARAMS.get("n_sma", TOMATO_N_SMA),
-            "m_slope": TUNING_PARAMS.get("m_slope", TOMATO_M_SLOPE),
-            "slope_threshold": TUNING_PARAMS.get("slope_threshold", TOMATO_SLOPE_THRESHOLD),
-            "position_limit": TUNING_PARAMS.get("position_limit", TOMATO_LIMIT),
-            "inventory_avg_units": TUNING_PARAMS.get("inventory_avg_units", TOMATO_AVG_UNITS),
-            "wall_inertia": TUNING_PARAMS.get("wall_inertia", 0.7),
-            "liq_threshold": TUNING_PARAMS.get("liq_threshold", 60)
+        self.osmium_params = {
+            "osmium_z_threshold": TUNING_PARAMS["osmium_z_threshold"],
+            "osmium_z_window": TUNING_PARAMS["osmium_z_window"],
+            "osmium_mm_limit": TUNING_PARAMS["osmium_mm_limit"],
+            "wall_inertia": TUNING_PARAMS["wall_inertia"],
+            "position_limit": 80
         }
-
-        # Instantiate strategies once
-        # self.emerald_strat = EmeraldStrategy(self.logger, self.emerald_params)
-        self.tomato_strat = TomatoStrategy(self.logger, self.tomato_params)
+        self.pepper_params = {
+            "wall_inertia": TUNING_PARAMS["wall_inertia"],
+            "position_limit": 80
+        }
+        self.osmium_strat = OsmiumStrategy(self.logger, self.osmium_params)
+        self.pepper_strat = PepperRootStrategy(self.logger, self.pepper_params)
     
     def run(self, state: TradingState):
-        """Main dispatcher — only per-tick work happens here."""
         result: Dict[str, List[Order]] = {}
-        
-        # 1. Parse Persistence State
         traderData = state.traderData if state.traderData else "{}"
         try:
             state_dict = json.loads(traderData)
         except Exception:
             state_dict = {}
 
-        # 2. Reset and run strategies
-        # if "EMERALDS" in state.order_depths:
-        #     self.emerald_strat.reset(state)
-        #     result["EMERALDS"] = self.emerald_strat.run(state_dict)
+        if "ASH_COATED_OSMIUM" in state.order_depths:
+            self.osmium_strat.reset(state)
+            result["ASH_COATED_OSMIUM"] = self.osmium_strat.run(state_dict)
 
-        if "TOMATOES" in state.order_depths:
-            self.tomato_strat.reset(state)
-            result["TOMATOES"] = self.tomato_strat.run(state_dict)
+        if "INTARIAN_PEPPER_ROOT" in state.order_depths:
+            self.pepper_strat.reset(state)
+            result["INTARIAN_PEPPER_ROOT"] = self.pepper_strat.run(state_dict)
 
-        # 3. Serialize Persistence State
         traderData = json.dumps(state_dict)
-        conversions = 0
-        return result, conversions, traderData
+        return result, 0, traderData

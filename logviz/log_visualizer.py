@@ -237,8 +237,9 @@ class HeatmapLegend(QWidget):
                 c = TRADE_VOLUME_COLORS[pal_idx]
                 swatch = cell.findChild(QLabel)
                 swatch.setStyleSheet(f"background-color: rgb({c[0]}, {c[1]}, {c[2]}); border: 1px solid #333;")
-                lo, hi = int(quantile_edges[i]), int(quantile_edges[i + 1])
-                rlbl.setText(f"{lo}-{hi}" if i < n_buckets - 1 else f">{lo}")
+                lo, hi = quantile_edges[i], quantile_edges[i + 1]
+                fmt = lambda v: f"{v:.0f}" if v == int(v) else f"{v:.2f}"
+                rlbl.setText(f"{fmt(lo)}-{fmt(hi)}" if i < n_buckets - 1 else f">{fmt(lo)}")
                 cell.setVisible(True)
             else:
                 cell.setVisible(False)
@@ -512,7 +513,7 @@ class LogVisualizer(QMainWindow):
                 if day_match: df = df.with_columns(pl.lit(int(day_match.group(1))).alias("day"))
                 t_dicts.extend(df.to_dicts())
         if not p_dfs: return
-        df = pl.concat(p_dfs).sort(['day', 'timestamp'])
+        df = pl.concat(p_dfs, how='diagonal_relaxed').sort(['day', 'timestamp'])
         self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': [], 'orders': [], '_continuous_ts': _is_timestamps_continuous(df), '_min_day': df['day'].min() if 'day' in df.columns else 0}
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list()
         self.cb_prod.clear(); self.cb_prod.addItems(products); self.cb_day.clear(); self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()])
@@ -541,7 +542,7 @@ class LogVisualizer(QMainWindow):
                     parts = line.split(':')
                     if len(parts) >= 5:
                         orders.append({'ts': ts, 'day': ts_to_day.get(ts, ts//1000000), 'product': parts[1] if len(parts)==6 else '', 'side': parts[2] if len(parts)==6 else parts[1],
-                                     'price': int(parts[3] if len(parts)==6 else parts[2]), 'qty': int(parts[4] if len(parts)==6 else parts[3]), 'tag': parts[-1]})
+                                     'price': float(parts[3] if len(parts)==6 else parts[2]), 'qty': int(parts[4] if len(parts)==6 else parts[3]), 'tag': parts[-1]})
                 elif line.startswith('LOGDBG:'):
                     parts = line[7:].split(':', 2)
                     debug_msgs.append({'ts': ts, 'tag': parts[0], 'product': parts[1] if len(parts)>2 else '', 'msg': parts[-1]})
@@ -641,7 +642,7 @@ class LogVisualizer(QMainWindow):
             self.img_item.setImage(self.ob_res['img'], autoLevels=False)
             self.img_item.setRect(get_rect(t, self.ob_res['levels']))
             self.img_item.setVisible(True)
-            o_res = build_order_placement_heatmap(self.data.get('orders',[]), prod, day, t, int(self.ob_res['levels'][0]), int(self.ob_res['levels'][-1]), cont_ts, min_day, ORDER_BUY_COLORS, ORDER_SELL_COLORS)
+            o_res = build_order_placement_heatmap(self.data.get('orders',[]), prod, day, t, self.ob_res['levels'], cont_ts, min_day, ORDER_BUY_COLORS, ORDER_SELL_COLORS)
             if o_res:
                 self.img_orders.setImage(o_res['img'], autoLevels=False)
                 self.img_orders.setRect(get_rect(t, self.ob_res['levels']))
