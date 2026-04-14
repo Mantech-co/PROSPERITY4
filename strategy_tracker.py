@@ -7,6 +7,18 @@ DEFAULT_REPO  = "ManukrishnanP/prosperity4-strategy-tracker"   # e.g. "yourorg/t
 DEFAULT_TOKEN = "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"   # e.g. "ghp_xxxxxxxxxxxxxxxxxxxx"
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUND SCHEDULE — edit cutoff dates (UTC); each value is when that round opens
+# ─────────────────────────────────────────────────────────────────────────────
+ROUND_CUTOFFS: dict = {
+    1: "2026-04-17 10:00",
+    2: "2026-04-20 10:00",
+    3: "2026-04-26 10:00",
+    4: "2026-04-28 10:00",
+    5: "2026-04-30 10:00",
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
 """
 strategy_tracker.py — Team Strategy Performance Tracker
 ========================================================
@@ -44,6 +56,16 @@ import zipfile
 from datetime import datetime, timezone
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
+
+
+def _get_current_round() -> int:
+    """Return current round based on ROUND_CUTOFFS and current UTC time."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    current = min(ROUND_CUTOFFS)
+    for rnd, cutoff_str in sorted(ROUND_CUTOFFS.items()):
+        if now >= datetime.strptime(cutoff_str, "%Y-%m-%d %H:%M"):
+            current = rnd
+    return current
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -307,7 +329,7 @@ class GitHubRepo:
 
 def upload_run(zip_path: str, author: str, strategy_name: str,
                notes: str, metrics: dict, config_data: dict,
-               repo: str, token: str) -> str:
+               repo: str, token: str, round_num: int = 1) -> str:
     run_ts = datetime.now(timezone.utc).isoformat()
     slug   = re.sub(r"[^a-z0-9_]", "_", author.lower())
     run_id = f"{slug}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
@@ -316,6 +338,7 @@ def upload_run(zip_path: str, author: str, strategy_name: str,
         "run_id":        run_id,
         "author":        author,
         "strategy_name": strategy_name,
+        "round":         round_num,
         "notes":         notes,
         "uploaded_at":   run_ts,
         "config":        config_data,
@@ -349,6 +372,23 @@ def fetch_records(repo: str, token: str) -> list[dict]:
             except json.JSONDecodeError:
                 pass
     return records
+
+
+def fetch_hidden(repo: str, token: str) -> set:
+    gh      = GitHubRepo(repo, token)
+    content = gh.get_file_content("hidden/index.json")
+    if content:
+        try:
+            return set(json.loads(content.decode()).get("hidden_run_ids", []))
+        except Exception:
+            pass
+    return set()
+
+
+def set_hidden(repo: str, token: str, hidden_ids: set) -> None:
+    gh   = GitHubRepo(repo, token)
+    data = json.dumps({"hidden_run_ids": sorted(hidden_ids)}, indent=2).encode()
+    gh.put_file("hidden/index.json", data, "update hidden run list")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -760,12 +800,23 @@ class UploadTab(ttk.Frame):
         form.grid(row=6, column=0, sticky="ew", padx=28, pady=0)
         form.columnconfigure(0, weight=1)
         form.columnconfigure(1, weight=1)
+        form.columnconfigure(2, weight=0)
 
         self._f_author = LabeledEntry(form, "AUTHOR", placeholder="e.g. jane_doe")
         self._f_author.grid(row=0, column=0, sticky="ew", padx=(0, 16), pady=(0, 16))
 
         self._f_strat = LabeledEntry(form, "STRATEGY NAME", placeholder="e.g. mean_reversion_v3")
         self._f_strat.grid(row=0, column=1, sticky="ew", pady=(0, 16))
+
+        self._f_round_var = tk.StringVar(value=str(_get_current_round()))
+        round_frame = tk.Frame(form, bg=BG)
+        round_frame.grid(row=0, column=2, sticky="ew", padx=(16, 0), pady=(0, 16))
+        tk.Label(round_frame, text="ROUND", font=FONT_MONO2, bg=BG, fg=TEXT2
+                 ).pack(anchor="w", pady=(0, 3))
+        tk.Spinbox(round_frame, from_=1, to=10, textvariable=self._f_round_var,
+                   width=5, bg=PANEL2, fg=TEXT, insertbackground=CYAN,
+                   buttonbackground=PANEL2, relief="flat", font=FONT_MONO
+                   ).pack(fill="x")
 
 
 
@@ -877,6 +928,12 @@ class UploadTab(ttk.Frame):
             messagebox.showerror("No metrics", "Zip could not be parsed.")
             return
 
+        round_num = _get_current_round()
+        try:
+            round_num = int(self._f_round_var.get())
+        except (ValueError, AttributeError):
+            pass
+
         self._upload_btn.configure(state="disabled")
         self._status("Uploading to GitHub…", CYAN)
 
@@ -886,7 +943,7 @@ class UploadTab(ttk.Frame):
                     zip_path=self._zip_path, author=author,
                     strategy_name=strat, notes=notes,
                     metrics=self._metrics, config_data=self._config,
-                    repo=repo, token=token)
+                    repo=repo, token=token, round_num=round_num)
                 self.after(0, self._on_success, run_id)
             except Exception as exc:
                 self.after(0, self._on_error, str(exc))
@@ -913,6 +970,7 @@ class UploadTab(ttk.Frame):
 
 _COLS = [
     ("Rank",       45,  "center"),
+    ("Round",      55,  "center"),
     ("Author",    120,  "w"),
     ("Strategy",  170,  "w"),
     ("Total PnL", 110,  "e"),
@@ -932,6 +990,7 @@ _SORT_KEYS: dict[str, tuple] = {
     "Trades":    ("metrics", "submission_trades"),
     "Volume":    ("metrics", "submission_volume"),
     "Date":      ("uploaded_at",),
+    "Round":     ("round",),
 }
 _LOWER_IS_BETTER = {"Max DD %"}
 
@@ -979,10 +1038,11 @@ def _get_pnl_series(record: dict) -> list[float]:
 class LeaderboardTab(ttk.Frame):
     def __init__(self, parent, app: "App"):
         super().__init__(parent, style="TFrame")
-        self._app     = app
-        self._records: list[dict] = []
-        self._sort_col = "Total PnL"
-        self._sort_asc = False
+        self._app        = app
+        self._records:    list[dict] = []
+        self._hidden_ids: set        = set()
+        self._sort_col   = "Total PnL"
+        self._sort_asc   = False
         self._build()
 
     # ─── Layout ───────────────────────────────────────────────────────────────
@@ -1026,6 +1086,21 @@ class LeaderboardTab(ttk.Frame):
                                          values=["All"], state="readonly", width=14)
         self._author_cb.pack(side="left")
         self._author_cb.bind("<<ComboboxSelected>>", lambda _: self.after(0, self._apply))
+
+        tk.Label(ctl, text="  Round", font=FONT_MONO2, bg=BG, fg=TEXT2
+                 ).pack(side="left", padx=(12, 6))
+        self._round_var = tk.StringVar(value="All")
+        self._round_cb  = ttk.Combobox(ctl, textvariable=self._round_var,
+                                        values=["All"], state="readonly", width=6)
+        self._round_cb.pack(side="left")
+        self._round_cb.bind("<<ComboboxSelected>>", lambda _: self.after(0, self._apply))
+
+        self._show_hidden_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(ctl, text=" Hidden", variable=self._show_hidden_var,
+                       command=self._apply,
+                       bg=BG, fg=TEXT2, selectcolor=PANEL2,
+                       activebackground=BG, activeforeground=CYAN,
+                       font=FONT_MONO2).pack(side="left", padx=(10, 0))
 
         ttk.Button(ctl, text="⟳  Refresh", style="Ghost.TButton",
                    command=self._refresh).pack(side="left", padx=(16, 0))
@@ -1106,6 +1181,13 @@ class LeaderboardTab(ttk.Frame):
         self._detail_canvas.grid(row=0, column=1, sticky="nsew", padx=(0, 14), pady=10)
         self._detail_canvas.bind("<Configure>", lambda _: self._on_select()) # Redraw on resize
 
+        btn_row = tk.Frame(self._detail, bg=PANEL)
+        btn_row.grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 8))
+        self._hide_btn = ttk.Button(btn_row, text="Hide Run",
+                                     style="Danger.TButton",
+                                     command=self._toggle_hide_selected)
+        self._hide_btn.pack(side="left")
+
         # ── Status ────────────────────────────────────────────────────────────
         self._lb_status = tk.StringVar(value="Click ⟳ Refresh to load records.")
         tk.Label(self, textvariable=self._lb_status, font=FONT_MONO2,
@@ -1129,23 +1211,29 @@ class LeaderboardTab(ttk.Frame):
 
         def _worker():
             try:
-                records = fetch_records(repo, token)
-                self.after(0, self._on_loaded, records)
+                records    = fetch_records(repo, token)
+                hidden_ids = fetch_hidden(repo, token)
+                self.after(0, self._on_loaded, records, hidden_ids)
             except Exception as exc:
                 self.after(0, self._on_error, str(exc))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_loaded(self, records: list[dict]):
-        self._records = records
+    def _on_loaded(self, records: list[dict], hidden_ids: set = None):
+        self._records    = records
+        self._hidden_ids = hidden_ids or set()
         all_prods:   set[str] = set()
         all_authors: set[str] = set()
+        all_rounds:  set[int] = set()
         for r in records:
             all_prods.update(r.get("metrics", {}).get("products", []))
             if r.get("author"):
                 all_authors.add(r["author"])
+            if r.get("round") is not None:
+                all_rounds.add(int(r["round"]))
         self._prod_cb.configure(  values=["All"] + sorted(all_prods))
         self._author_cb.configure(values=["All"] + sorted(all_authors))
+        self._round_cb.configure( values=["All"] + [str(rn) for rn in sorted(all_rounds)])
         self._apply()
         self._lb_status.set(f"{len(records)} record(s) loaded.")
         self._app.status.set(f"Leaderboard: {len(records)} runs loaded.", GREEN)
@@ -1171,16 +1259,22 @@ class LeaderboardTab(ttk.Frame):
         self._apply()
 
     def _apply(self):
-        col         = self._sort_var.get()
-        prod_filter = self._prod_var.get()
-        auth_filter = self._author_var.get()
-        records     = list(self._records)
+        col          = self._sort_var.get()
+        prod_filter  = self._prod_var.get()
+        auth_filter  = self._author_var.get()
+        round_filter = self._round_var.get()
+        show_hidden  = self._show_hidden_var.get()
+        records      = list(self._records)
 
+        if not show_hidden:
+            records = [r for r in records if r.get("run_id") not in self._hidden_ids]
         if prod_filter and prod_filter != "All":
             records = [r for r in records
                        if prod_filter in r.get("metrics", {}).get("products", [])]
         if auth_filter and auth_filter != "All":
             records = [r for r in records if r.get("author") == auth_filter]
+        if round_filter and round_filter != "All":
+            records = [r for r in records if str(r.get("round", "")) == round_filter]
 
         path = _SORT_KEYS.get(col, ("metrics", "total_pnl"))
 
@@ -1207,24 +1301,30 @@ class LeaderboardTab(ttk.Frame):
             self._tree.delete(row)
 
         for rank, r in enumerate(records, 1):
-            m    = r.get("metrics", {})
-            pnl  = m.get("total_pnl", 0.0)
-            date = (r.get("uploaded_at", "")[:10])
-            prods = ", ".join(m.get("products", []))
+            run_id    = r.get("run_id", str(rank))
+            is_hidden = run_id in self._hidden_ids
+            m         = r.get("metrics", {})
+            pnl       = m.get("total_pnl", 0.0)
+            date      = (r.get("uploaded_at", "")[:10])
+            prods     = ", ".join(m.get("products", []))
 
             pnl_str = f"{pnl:+,.2f}" if pnl != 0 else "0.00"
             sh_str  = f"{m.get('sharpe', 0):.3f}"
             dd_str  = f"{m.get('max_drawdown_pct', 0):.2f}%"
 
             rank_str = f"{'🥇' if rank==1 else '🥈' if rank==2 else '🥉' if rank==3 else str(rank)}"
+            if is_hidden:
+                rank_str = f"∅{rank}"
 
-            tag = ("gold" if rank == 1 else
+            tag = ("dim" if is_hidden else
+                   "gold" if rank == 1 else
                    "silver" if rank == 2 else
                    "bronze" if rank == 3 else
                    "neg" if pnl < 0 else "dim")
 
-            self._tree.insert("", "end", iid=r.get("run_id", str(rank)),
+            self._tree.insert("", "end", iid=run_id,
                               values=(rank_str,
+                                      r.get("round", "—"),
                                       r.get("author", "—"),
                                       r.get("strategy_name", "—"),
                                       pnl_str, sh_str, dd_str,
@@ -1348,6 +1448,38 @@ class LeaderboardTab(ttk.Frame):
         self._detail_lbl.configure(text="\n".join(lines))
         _draw_pnl_on_canvas(self._detail_canvas, _get_pnl_series(record),
                            final_pnl=m.get("total_pnl"))
+        self._update_hide_btn()
+
+    def _update_hide_btn(self):
+        sel = self._tree.selection()
+        if not sel:
+            return
+        if sel[0] in self._hidden_ids:
+            self._hide_btn.configure(text="Unhide Run", style="Ghost.TButton")
+        else:
+            self._hide_btn.configure(text="Hide Run",   style="Danger.TButton")
+
+    def _toggle_hide_selected(self):
+        sel = self._tree.selection()
+        if not sel:
+            return
+        run_id = sel[0]
+        repo  = self._app.get_repo()
+        token = self._app.get_token()
+        if run_id in self._hidden_ids:
+            self._hidden_ids.discard(run_id)
+        else:
+            self._hidden_ids.add(run_id)
+        self._update_hide_btn()
+        self._apply()
+        self._app.status.set("Saving hidden list…", CYAN)
+        def _worker():
+            try:
+                set_hidden(repo, token, self._hidden_ids)
+                self.after(0, lambda: self._app.status.set("Hidden list saved.", GREEN))
+            except Exception as exc:
+                self.after(0, lambda: self._app.status.set(f"Error saving hidden: {exc}", RED))
+        threading.Thread(target=_worker, daemon=True).start()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
