@@ -451,6 +451,25 @@ class LogVisualizer(QMainWindow):
         g = self.geometry()
         cfg = self._read_config()
         cfg['window'] = {'x': g.x(), 'y': g.y(), 'w': g.width(), 'h': g.height(), 'tab': self.tabs.currentIndex()}
+        if self.data:
+            legend_vis = {
+                'Heatmap': self.img_item.isVisible(),
+                'Order Placement': self.img_orders.isVisible(),
+                'Mid Price': self.curve_mid.isVisible(),
+                'Bot Trades': self.sc_bot.isVisible(),
+                'My Buy': self.sc_buy.isVisible(),
+                'My Sell': self.sc_sell.isVisible(),
+            }
+            for name, curve in self.custom_curves.items():
+                legend_vis[f'custom:{name}'] = curve.isVisible()
+            cfg['view_state'] = {
+                'product': self.cb_prod.currentText(),
+                'day': self.cb_day.currentText(),
+                'dash_product': self.cb_dash_prod.currentText(),
+                'dd_pct': self.chk_dd_pct.isChecked(),
+                'gen_pane_minimized': self._gen_pane_minimized,
+                'legend': legend_vis,
+            }
         self._write_config(cfg)
 
     def _restore_window_state(self):
@@ -494,13 +513,41 @@ class LogVisualizer(QMainWindow):
     def _focus_keybinds_tab(self):
         self.tabs.setCurrentIndex(self._keybinds_tab_index)
 
+    def _apply_view_state(self):
+        vs = self._read_config().get('view_state', {})
+        if not vs: return
+        for combo, key in [(self.cb_prod, 'product'), (self.cb_day, 'day'), (self.cb_dash_prod, 'dash_product')]:
+            val = vs.get(key, '')
+            if val and combo.findText(val) >= 0:
+                combo.blockSignals(True); combo.setCurrentText(val); combo.blockSignals(False)
+        self.chk_dd_pct.blockSignals(True); self.chk_dd_pct.setChecked(vs.get('dd_pct', False)); self.chk_dd_pct.blockSignals(False)
+        minimized = vs.get('gen_pane_minimized', False)
+        if minimized != self._gen_pane_minimized:
+            self._gen_pane_minimized = minimized
+            if minimized: self.p_gen.setFixedHeight(0); self.p_gen.setVisible(False)
+            else: self.p_gen.setFixedHeight(200)
+        legend = vs.get('legend', {})
+        fixed = {'Heatmap': self.img_item, 'Order Placement': self.img_orders,
+                 'Mid Price': self.curve_mid, 'Bot Trades': self.sc_bot,
+                 'My Buy': self.sc_buy, 'My Sell': self.sc_sell}
+        for name, item in fixed.items():
+            if name in legend: item.setVisible(legend[name])
+
+    def _apply_custom_curve_visibility(self):
+        legend = self._read_config().get('view_state', {}).get('legend', {})
+        if not legend: return
+        for name, curve in self.custom_curves.items():
+            key = f'custom:{name}'
+            if key in legend: curve.setVisible(legend[key])
+
     def _apply_saved_settings(self):
         saved = self._load_data_settings()
-        if not saved or not self.data: return
-        current_keys = set(self.data.get('custom', {}).keys())
-        for k, v in saved.items():
-            if k in current_keys:
-                self.data_settings[k] = v
+        if saved and self.data:
+            current_keys = set(self.data.get('custom', {}).keys())
+            for k, v in saved.items():
+                if k in current_keys:
+                    self.data_settings[k] = v
+        self._apply_view_state()
 
     def _toggle_gen_pane(self):
         self._gen_pane_minimized = not self._gen_pane_minimized
@@ -669,7 +716,9 @@ class LogVisualizer(QMainWindow):
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list()
         self.cb_prod.clear(); self.cb_prod.addItems(products); self.cb_day.clear(); self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()])
         self.cb_prod.blockSignals(False); self.cb_dash_prod.clear(); self.cb_dash_prod.addItems(['Overall'] + products)
-        self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._process_selection(); self._update_dashboard()
+        self._apply_saved_settings()
+        self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._process_selection()
+        self._apply_custom_curve_visibility(); self._update_dashboard()
 
     def _load_file(self, path):
         self._current_log_path = path
@@ -714,7 +763,8 @@ class LogVisualizer(QMainWindow):
         self.data_settings = {}
         self._apply_saved_settings()
         self.btn_backtest.setVisible(self._is_backtest_log(path))
-        self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._update_sandbox_table(); self._process_selection(); self._update_dashboard()
+        self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._update_sandbox_table(); self._process_selection()
+        self._apply_custom_curve_visibility(); self._update_dashboard()
 
     def _update_sandbox_table(self):
         self.sb_table.setRowCount(len(self.sandbox_msgs))
@@ -852,6 +902,30 @@ class LogVisualizer(QMainWindow):
             pk = np.maximum.accumulate(pnl); dd = pk - pnl
             if self.chk_dd_pct.isChecked() and np.any(pk>0): dd = (dd / np.where(pk>0, pk, 1)) * 100
             self.curve_dash_dd.setData(t, dd)
+            returns = np.diff(pnl)
+            if len(returns) > 1 and np.std(returns) > 0:
+                sharpe = (np.mean(returns) / np.std(returns)) * np.sqrt(len(returns))
+            else:
+                sharpe = float('nan')
+            win_rate = np.sum(returns > 0) / len(returns) * 100 if len(returns) > 0 else 0.0
+            self.lbl_sharpe.setText(f"Sharpe Ratio: {sharpe:.3f}" if not np.isnan(sharpe) else "Sharpe Ratio: --")
+            self.lbl_winrate.setText(f"Win Rate: {win_rate:.1f}%")
+        else:
+            self.lbl_sharpe.setText("Sharpe Ratio: --")
+            self.lbl_winrate.setText("Win Rate: --")
+        trades = self.data.get('trades', [])
+        my_count = bot_count = total_vol = 0
+        for tr in trades:
+            if p != 'Overall' and tr.get('symbol') != p: continue
+            if d != 'All' and 'day' in tr and str(tr['day']) != d: continue
+            qty = abs(int(tr.get('quantity', 0)))
+            is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+            is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+            if is_b or is_s: my_count += 1; total_vol += qty
+            else: bot_count += 1; total_vol += qty
+        self.lbl_volume.setText(f"Total Volume: {total_vol:,}")
+        self.lbl_my_trades.setText(f"My Trades: {my_count}")
+        self.lbl_bot_trades.setText(f"Bot Trades: {bot_count}")
         self.p_dash_pnl.autoRange(); self.p_dash_dd.autoRange()
 
 def _auto_detect_log(script_dir: str):
