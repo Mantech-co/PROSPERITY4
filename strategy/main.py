@@ -7,10 +7,14 @@ from datamodel import OrderDepth, TradingState, Order, Trade
 
 TUNING_PARAMS = {
     "osmium_z_threshold": 2.0,
-    "osmium_z_window": 20,
-    "osmium_mm_limit": 16,  # 20% of 80
-    "wall_inertia": 0.5,
-    "position_limit": 80
+    "osmium_z_window": 200,
+    "osmium_mm_limit": 80,  # 20% of 80
+    "wall_inertia": 0.3,     # price EMA alpha
+    "vol_alpha": 0.3,        # volume class-mean EMA alpha
+    "outlier_frac": 0.2,     # reject obs if deviation > outlier_frac * thin_spread
+    "position_limit": 80,
+    "vol_threshold": 20,
+    "price_threshold": 3.0
 }
 
 class Logger:
@@ -91,68 +95,55 @@ class BaseStrategy:
         self.sell_capacity -= exec_qty
         self.logger.log_order(self.PRODUCT, "SELL", int(price), exec_qty, tag)
 
-    def get_lr_prediction(self, history: List[float]) -> Optional[float]:
-        if len(history) < 3:
-            return None
-        # y_t = (4*y3 + y2 - 2*y1) / 3
-        return (4.0 * history[-1] + history[-2] - 2.0 * history[-3]) / 3.0
+    def _consolidate(self) -> List[Order]:
+        """Merge orders at the same price level before submission."""
+        merged: Dict[int, int] = {}
+        for o in self.orders:
+            merged[o.price] = merged.get(o.price, 0) + o.quantity
+        return [Order(self.PRODUCT, price, qty) for price, qty in merged.items() if qty != 0]
 
     def update_inertial_walls(self, state_dict: Dict[str, Any], augment: bool = False) -> Tuple[Optional[float], Optional[float]]:
-        prev_bid = state_dict.get(f"{self.PRODUCT}_INERTIAL_BID")
-        prev_ask = state_dict.get(f"{self.PRODUCT}_INERTIAL_ASK")
-        alpha = self.params.get("wall_inertia", 0.5)
+        P = self.PRODUCT
+        vol_threshold = self.params.get("vol_threshold", 20)
+        price_threshold = self.params.get("price_threshold", 10.0)
 
-        buy_orders = self.order_depth.buy_orders
-        sell_orders = self.order_depth.sell_orders
+        # 1. Filter orders: volume <= vol_threshold
+        bid_orders = sorted([(p, v) for p, v in self.order_depth.buy_orders.items() if abs(v) <= vol_threshold], reverse=True)
+        ask_orders = sorted([(p, v) for p, v in self.order_depth.sell_orders.items() if abs(v) <= vol_threshold])
 
-        # Bid Wall
-        if not buy_orders:
-            if augment:
-                history = state_dict.get(f"{self.PRODUCT}_BID_HIST", [])
-                inertial_bid = self.get_lr_prediction(history) or prev_bid
-            else:
-                inertial_bid = prev_bid
-        else:
-            best_bid = max(buy_orders.keys())
-            if prev_bid is None:
-                inertial_bid = best_bid
-            else:
-                tentative_bid = best_bid * alpha + (1 - alpha) * prev_bid
-                filtered_bids = {p: v for p, v in buy_orders.items() if p < tentative_bid + 1}
-                inertial_bid = max(filtered_bids.keys()) if filtered_bids else tentative_bid
+        prev_bid = state_dict.get(f"{P}_PBID")
+        prev_ask = state_dict.get(f"{P}_PASK")
 
-        # Ask Wall
-        if not sell_orders:
-            if augment:
-                history = state_dict.get(f"{self.PRODUCT}_ASK_HIST", [])
-                inertial_ask = self.get_lr_prediction(history) or prev_ask
-            else:
-                inertial_ask = prev_ask
-        else:
-            best_ask = min(sell_orders.keys())
-            if prev_ask is None:
-                inertial_ask = best_ask
-            else:
-                tentative_ask = best_ask * alpha + (1 - alpha) * prev_ask
-                filtered_asks = {p: v for p, v in sell_orders.items() if p > tentative_ask - 1}
-                inertial_ask = min(filtered_asks.keys()) if filtered_asks else tentative_ask
+        # 2. Find best bid: highest price within deviation threshold from previous
+        best_bid = None
+        for p, v in bid_orders:
+            if prev_bid is None or abs(p - prev_bid) <= price_threshold:
+                best_bid = float(p)
+                break
 
-        # Update History for LR
-        if inertial_bid is not None:
-            bid_hist = state_dict.get(f"{self.PRODUCT}_BID_HIST", [])
-            bid_hist.append(inertial_bid)
-            if len(bid_hist) > 3: bid_hist.pop(0)
-            state_dict[f"{self.PRODUCT}_BID_HIST"] = bid_hist
-            state_dict[f"{self.PRODUCT}_INERTIAL_BID"] = inertial_bid
+        # 3. Find best ask: lowest price within deviation threshold from previous
+        best_ask = None
+        for p, v in ask_orders:
+            if prev_ask is None or abs(p - prev_ask) <= price_threshold:
+                best_ask = float(p)
+                break
 
-        if inertial_ask is not None:
-            ask_hist = state_dict.get(f"{self.PRODUCT}_ASK_HIST", [])
-            ask_hist.append(inertial_ask)
-            if len(ask_hist) > 3: ask_hist.pop(0)
-            state_dict[f"{self.PRODUCT}_ASK_HIST"] = ask_hist
-            state_dict[f"{self.PRODUCT}_INERTIAL_ASK"] = inertial_ask
+        # 4. If left with no orders, augment value using previous value
+        if best_bid is None:
+            best_bid = prev_bid
 
-        return inertial_bid, inertial_ask
+        if best_ask is None:
+            best_ask = prev_ask
+
+        # Update state for next cycle
+        if best_bid is not None:
+            state_dict[f"{P}_PBID"] = best_bid
+
+        if best_ask is not None:
+            state_dict[f"{P}_PASK"] = best_ask
+
+        # self.logger.log(best_bid=best_bid, best_ask=best_ask)
+        return best_bid, best_ask
 
 class OsmiumStrategy(BaseStrategy):
     PRODUCT = "ASH_COATED_OSMIUM"
@@ -162,58 +153,70 @@ class OsmiumStrategy(BaseStrategy):
         if bid_wall is None or ask_wall is None:
             return []
 
-        mid_price = (bid_wall + ask_wall) / 2.0
-        
-        # Z-Score Calculation
+        mid = (bid_wall + ask_wall) / 2.0
+
+        self.logger.log(mid=mid)
+
+        # ── Z-score bookkeeping ─────────────────────────────────────────
         window = self.params.get("osmium_z_window", 20)
         prices = state_dict.get("OSMIUM_PRICES", [])
-        prices.append(mid_price)
-        if len(prices) > window:
-            prices.pop(0)
+        prices.append(mid)
+        if len(prices) > window: prices.pop(0)
         state_dict["OSMIUM_PRICES"] = prices
 
+        z_score = None
         if len(prices) >= window:
             mean = sum(prices) / len(prices)
             variance = sum((x - mean) ** 2 for x in prices) / len(prices)
             std = math.sqrt(variance) if variance > 0 else 1e-6
-            z_score = (mid_price - mean) / std
-            
-            threshold = self.params.get("osmium_z_threshold", 2.0)
-            
-            # Directional component
-            if z_score > threshold:
-                # Overpriced -> Short
-                target_pos = -self.limit
-                if self.current_pos > target_pos:
-                    # Take bids
-                    sorted_bids = sorted(self.order_depth.buy_orders.items(), reverse=True)
-                    for bp, bv in sorted_bids:
-                        if self.current_pos <= target_pos: break
-                        vol = min(abs(bv), self.current_pos - target_pos)
-                        self.ask(bp, vol, tag="Z_TAKE_BID")
-            elif z_score < -threshold:
-                # Underpriced -> Long
-                target_pos = self.limit
-                if self.current_pos < target_pos:
-                    # Take asks
-                    sorted_asks = sorted(self.order_depth.sell_orders.items())
-                    for sp, sv in sorted_asks:
-                        if self.current_pos >= target_pos: break
-                        vol = min(abs(sv), target_pos - self.current_pos)
-                        self.bid(sp, vol, tag="Z_TAKE_ASK")
+            z_score = (mid - mean) / std
+            self.logger.log(z_score=z_score)
 
-        # Market Making component (20% of limit)
+        threshold = self.params.get("osmium_z_threshold", 2.0)
         mm_limit = self.params.get("osmium_mm_limit", 16)
-        # Place orders around mid-price
-        # Overbid bid_wall if possible, underbid ask_wall
-        mm_bid = round(bid_wall)
-        mm_ask = round(ask_wall)
-        
-        # We cap MM orders to mm_limit
-        self.bid(mm_bid, mm_limit, tag="MM_BID")
-        self.ask(mm_ask, mm_limit, tag="MM_ASK")
 
-        return self.orders
+        # ── 1. TAKING ──────────────────────────────────────────────────
+        # Sell into bids sitting above mid (free edge)
+        for bp, bv in sorted(self.order_depth.buy_orders.items(), reverse=True):
+            if bp <= mid or self.sell_capacity <= 0: break
+            self.ask(bp, min(abs(bv), self.sell_capacity), tag="TAKE_BID")
+
+        # Buy from asks sitting below mid
+        for sp, sv in sorted(self.order_depth.sell_orders.items()):
+            if sp >= mid or self.buy_capacity <= 0: break
+            self.bid(sp, min(abs(sv), self.buy_capacity), tag="TAKE_ASK")
+
+        # ── 2. Z-SCORE signal (passive orders at mid) ──────────────────
+        z_signal = None   # 'BUY' or 'SELL'
+        z_price  = round(mid)
+        if z_score is not None:
+            if z_score > threshold:
+                z_signal = 'SELL'   # overpriced → short
+            elif z_score < -threshold:
+                z_signal = 'BUY'    # underpriced → long
+
+        # ── 3. MARKET MAKING ───────────────────────────────────────────
+        mm_bid_p = round(bid_wall) + 1
+        mm_ask_p = round(ask_wall) - 1
+
+        # Z-score takes precedence: suppress MM side that would cross it
+        spread_ok  = mm_bid_p < mm_ask_p
+        do_mm_bid  = spread_ok and not (z_signal == 'SELL' and mm_bid_p >= z_price)
+        do_mm_ask  = spread_ok and not (z_signal == 'BUY'  and mm_ask_p <= z_price)
+
+        # Apply z-score first so it gets capacity priority
+        if z_signal == 'SELL' and self.sell_capacity > 0:
+            self.ask(z_price, self.sell_capacity, tag="Z_ASK")
+        elif z_signal == 'BUY' and self.buy_capacity > 0:
+            self.bid(z_price, self.buy_capacity, tag="Z_BID")
+
+        # Apply MM with remaining capacity
+        if do_mm_bid and self.buy_capacity > 0:
+            self.bid(mm_bid_p, min(mm_limit, self.buy_capacity), tag="MM_BID")
+        if do_mm_ask and self.sell_capacity > 0:
+            self.ask(mm_ask_p, min(mm_limit, self.sell_capacity), tag="MM_ASK")
+
+        return self._consolidate()
 
 class PepperRootStrategy(BaseStrategy):
     PRODUCT = "INTARIAN_PEPPER_ROOT"
@@ -227,7 +230,18 @@ class PepperRootStrategy(BaseStrategy):
         mid = (bid_wall + ask_wall) / 2.0
         self.bid(round(bid_wall), self.limit, tag="MM_BID")
         self.ask(round(ask_wall), self.limit, tag="MM_ASK")
-        return self.orders
+        return self._consolidate()
+
+class IntarianRootStrategy(BaseStrategy):
+    PRODUCT = "INTARIAN_ROOT"
+
+    def run(self, state_dict: Dict[str, Any]) -> List[Order]:
+        # Buy and hold: take cheapest asks until at position limit
+        for price, vol in sorted(self.order_depth.sell_orders.items()):
+            if self.buy_capacity <= 0:
+                break
+            self.bid(price, min(abs(vol), self.buy_capacity), tag="BUY_HOLD")
+        return self._consolidate()
 
 class Trader:
     def __init__(self):
@@ -237,14 +251,26 @@ class Trader:
             "osmium_z_window": TUNING_PARAMS["osmium_z_window"],
             "osmium_mm_limit": TUNING_PARAMS["osmium_mm_limit"],
             "wall_inertia": TUNING_PARAMS["wall_inertia"],
+            "vol_alpha": TUNING_PARAMS["vol_alpha"],
+            "outlier_frac": TUNING_PARAMS["outlier_frac"],
+            "vol_threshold": TUNING_PARAMS["vol_threshold"],
+            "price_threshold": TUNING_PARAMS["price_threshold"],
             "position_limit": 80
         }
         self.pepper_params = {
             "wall_inertia": TUNING_PARAMS["wall_inertia"],
+            "vol_alpha": TUNING_PARAMS["vol_alpha"],
+            "outlier_frac": TUNING_PARAMS["outlier_frac"],
+            "vol_threshold": TUNING_PARAMS["vol_threshold"],
+            "price_threshold": TUNING_PARAMS["price_threshold"],
+            "position_limit": 80
+        }
+        self.intarian_root_params = {
             "position_limit": 80
         }
         self.osmium_strat = OsmiumStrategy(self.logger, self.osmium_params)
         self.pepper_strat = PepperRootStrategy(self.logger, self.pepper_params)
+        self.intarian_root_strat = IntarianRootStrategy(self.logger, self.intarian_root_params)
     
     def run(self, state: TradingState):
         result: Dict[str, List[Order]] = {}
@@ -258,9 +284,13 @@ class Trader:
             self.osmium_strat.reset(state)
             result["ASH_COATED_OSMIUM"] = self.osmium_strat.run(state_dict)
 
-        if "INTARIAN_PEPPER_ROOT" in state.order_depths:
-            self.pepper_strat.reset(state)
-            result["INTARIAN_PEPPER_ROOT"] = self.pepper_strat.run(state_dict)
+        # if "INTARIAN_PEPPER_ROOT" in state.order_depths:
+        #     self.pepper_strat.reset(state)
+        #     result["INTARIAN_PEPPER_ROOT"] = self.pepper_strat.run(state_dict)
+
+        if "INTARIAN_ROOT" in state.order_depths:
+            self.intarian_root_strat.reset(state)
+            result["INTARIAN_ROOT"] = self.intarian_root_strat.run(state_dict)
 
         traderData = json.dumps(state_dict)
         return result, 0, traderData

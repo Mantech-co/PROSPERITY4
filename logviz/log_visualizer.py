@@ -1,4 +1,4 @@
-import sys, os, json, re
+import sys, os, json, re, subprocess
 from io import StringIO
 import numpy as np
 import polars as pl
@@ -256,6 +256,26 @@ def _is_timestamps_continuous(df):
             return True
     return False
 
+class BacktestRunner(QThread):
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, script_path, backtests_dir):
+        super().__init__()
+        self.script_path = script_path
+        self.backtests_dir = backtests_dir
+
+    def run(self):
+        try:
+            subprocess.run([sys.executable, self.script_path], cwd=os.path.dirname(self.script_path), check=True)
+            logs = [os.path.join(self.backtests_dir, f) for f in os.listdir(self.backtests_dir) if f.endswith('.log')]
+            if logs:
+                self.finished.emit(max(logs, key=os.path.getmtime))
+            else:
+                self.error.emit("No .log files found in backtests dir")
+        except Exception as e:
+            self.error.emit(str(e))
+
 # --- Data Settings Dialog ---
 class DataSetupDialog(QDialog):
     def __init__(self, keys, settings, parent=None):
@@ -292,8 +312,12 @@ class LogVisualizer(QMainWindow):
         self.markup_lines = []
         self.markup_enabled = False
         self.sandbox_msgs = {}
+        self._current_log_path = None
+        self._gen_pane_minimized = False
+        self._backtest_runner = None
         pg.setConfigOptions(useOpenGL=True, imageAxisOrder='row-major')
         self._build_ui()
+        self._restore_window_state()
         if log_path: self._load_file(log_path)
 
     def _build_ui(self):
@@ -301,12 +325,13 @@ class LogVisualizer(QMainWindow):
         main_layout = QVBoxLayout(central); main_layout.setContentsMargins(0, 0, 0, 0); main_layout.setSpacing(0)
         controls = QHBoxLayout(); controls.setContentsMargins(12, 12, 12, 12); controls.setSpacing(12)
         btn_open = QPushButton("📂 Open Log"); btn_open.clicked.connect(self._open_dialog); controls.addWidget(btn_open)
+        self.btn_backtest = QPushButton("⟳ Refresh Backtest"); self.btn_backtest.clicked.connect(self._run_backtest); self.btn_backtest.setVisible(False); controls.addWidget(self.btn_backtest)
         btn_import = QPushButton("📊 Import Data"); btn_import.clicked.connect(self._import_dataviz_data); controls.addWidget(btn_import)
         controls.addWidget(QLabel("Product:")); self.cb_prod = QComboBox(); controls.addWidget(self.cb_prod)
         controls.addWidget(QLabel("Day:")); self.cb_day = QComboBox(); controls.addWidget(self.cb_day)
         self.cb_prod.currentTextChanged.connect(self._process_selection); self.cb_day.currentTextChanged.connect(self._process_selection)
         controls.addStretch()
-        btn_setup = QPushButton("⚙️ Data Setup"); btn_setup.clicked.connect(self._open_data_setup); controls.addWidget(btn_setup)
+        btn_setup = QPushButton("⚙️ Data Setup [S]"); btn_setup.clicked.connect(self._open_data_setup); controls.addWidget(btn_setup)
         self.lbl_markup = QLabel("MARKUP: OFF"); self.lbl_markup.setStyleSheet(f"color: {DIM}; font-weight: bold;"); controls.addWidget(self.lbl_markup)
         self.lbl_zoom = QLabel("Mode: XY"); self.lbl_zoom.setStyleSheet(f"color: {DIM};"); controls.addWidget(self.lbl_zoom)
         btn_export = QPushButton("💾 Export Custom CSV"); btn_export.clicked.connect(self._export_custom_csv); controls.addWidget(btn_export)
@@ -373,19 +398,145 @@ class LogVisualizer(QMainWindow):
         QShortcut(QKeySequence("Z"), self).activated.connect(lambda: self._set_zoom("xy"))
         QShortcut(QKeySequence("A"), self).activated.connect(self._autoscale_all)
         QShortcut(QKeySequence("M"), self).activated.connect(self._toggle_markup)
+        QShortcut(QKeySequence("Shift+M"), self).activated.connect(self._toggle_gen_pane)
         QShortcut(QKeySequence("C"), self).activated.connect(self._clear_markup)
         QShortcut(QKeySequence("S"), self).activated.connect(self._open_data_setup)
+        QShortcut(QKeySequence("?"), self).activated.connect(self._focus_keybinds_tab)
 
         self._build_sandbox_tab()
+        self._build_keybinds_tab()
 
     def _open_data_setup(self):
         if not self.data: return
         dlg = DataSetupDialog(sorted(self.data.get('custom',{}).keys()), self.data_settings, self)
         if dlg.exec():
             self.data_settings = dlg.get_results()
+            self._save_data_settings()
             for c in self.custom_curves.values(): self.p_m.removeItem(c); self.p_gen.removeItem(c)
             self.custom_curves = {}
             self._process_selection()
+
+    def _settings_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), '.logviz_settings.json')
+
+    def _read_config(self):
+        try:
+            p = self._settings_path()
+            if os.path.exists(p):
+                with open(p) as f:
+                    data = json.load(f)
+                    # migrate old flat data_settings format
+                    if data and not any(k in data for k in ('data_settings', 'window')):
+                        return {'data_settings': data}
+                    return data
+        except Exception as e:
+            print(f"Config read error: {e}")
+        return {}
+
+    def _write_config(self, cfg):
+        try:
+            with open(self._settings_path(), 'w') as f: json.dump(cfg, f)
+        except Exception as e:
+            print(f"Config write error: {e}")
+
+    def _save_data_settings(self):
+        cfg = self._read_config()
+        cfg['data_settings'] = self.data_settings
+        self._write_config(cfg)
+
+    def _load_data_settings(self):
+        return self._read_config().get('data_settings', {})
+
+    def _save_window_state(self):
+        g = self.geometry()
+        cfg = self._read_config()
+        cfg['window'] = {'x': g.x(), 'y': g.y(), 'w': g.width(), 'h': g.height(), 'tab': self.tabs.currentIndex()}
+        self._write_config(cfg)
+
+    def _restore_window_state(self):
+        w = self._read_config().get('window')
+        if not w: return
+        self.setGeometry(w.get('x', 50), w.get('y', 50), w.get('w', 1600), w.get('h', 920))
+        tab = w.get('tab', 0)
+        if 0 <= tab < self.tabs.count():
+            self.tabs.setCurrentIndex(tab)
+
+    def closeEvent(self, event):
+        self._save_window_state()
+        super().closeEvent(event)
+
+    def _build_keybinds_tab(self):
+        keybinds = [
+            ("X",       "Zoom X axis only"),
+            ("Y",       "Zoom Y axis only"),
+            ("Z",       "Zoom XY (reset)"),
+            ("A",       "Autoscale all plots"),
+            ("M",       "Toggle markup mode"),
+            ("Shift+M", "Toggle secondary (gen) pane"),
+            ("C",       "Clear markup lines"),
+            ("S",       "Open Data Setup"),
+            ("?",       "Go to this tab"),
+        ]
+        container = QWidget(); layout = QVBoxLayout(container); layout.setContentsMargins(24, 24, 24, 24); layout.setSpacing(0)
+        table = QTableWidget(len(keybinds), 2); table.setHorizontalHeaderLabels(["Key", "Action"])
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for i, (key, desc) in enumerate(keybinds):
+            k_item = QTableWidgetItem(key); k_item.setForeground(QBrush(QColor(ACCENT_CYAN)))
+            k_item.setFont(QFont("JetBrains Mono", 10, QFont.Weight.Bold))
+            k_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(i, 0, k_item); table.setItem(i, 1, QTableWidgetItem(desc))
+        table.resizeRowsToContents(); table.setMaximumWidth(500); layout.addWidget(table); layout.addStretch()
+        self._keybinds_tab_index = self.tabs.addTab(container, "Keys")
+
+    def _focus_keybinds_tab(self):
+        self.tabs.setCurrentIndex(self._keybinds_tab_index)
+
+    def _apply_saved_settings(self):
+        saved = self._load_data_settings()
+        if not saved or not self.data: return
+        current_keys = set(self.data.get('custom', {}).keys())
+        for k, v in saved.items():
+            if k in current_keys:
+                self.data_settings[k] = v
+
+    def _toggle_gen_pane(self):
+        self._gen_pane_minimized = not self._gen_pane_minimized
+        if self._gen_pane_minimized:
+            self.p_gen.setFixedHeight(0)
+            self.p_gen.setVisible(False)
+        else:
+            self.p_gen.setFixedHeight(200)
+            if self.data:
+                has_generic = any(self.data_settings.get(k, "generic") == "generic" for k in self.data.get('custom', {}))
+                self.p_gen.setVisible(has_generic)
+
+    def _is_backtest_log(self, path):
+        if not path: return False
+        return 'backtests' in os.path.normpath(path).split(os.sep)
+
+    def _run_backtest(self):
+        self.btn_backtest.setEnabled(False)
+        self.btn_backtest.setText("⟳ Running...")
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = os.path.join(project_root, 'run_my_strategy.py')
+        backtests_dir = os.path.join(project_root, 'backtests')
+        self._backtest_runner = BacktestRunner(script, backtests_dir)
+        self._backtest_runner.finished.connect(self._on_backtest_done)
+        self._backtest_runner.error.connect(self._on_backtest_error)
+        self._backtest_runner.start()
+
+    def _on_backtest_done(self, log_path):
+        self.btn_backtest.setEnabled(True)
+        self.btn_backtest.setText("⟳ Refresh Backtest")
+        self._load_file(log_path)
+
+    def _on_backtest_error(self, msg):
+        self.btn_backtest.setEnabled(True)
+        self.btn_backtest.setText("⟳ Refresh Backtest")
+        QMessageBox.warning(self, "Backtest Error", msg)
 
     def _toggle_markup(self):
         self.markup_enabled = not self.markup_enabled
@@ -521,6 +672,7 @@ class LogVisualizer(QMainWindow):
         self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._process_selection(); self._update_dashboard()
 
     def _load_file(self, path):
+        self._current_log_path = path
         with open(path, encoding='utf-8') as f: raw = json.load(f)
         csv_str = raw.get('activitiesLog', '').replace('\\n', '\n')
         df = pl.read_csv(StringIO(csv_str), separator=';', null_values=['', 'nan'])
@@ -553,6 +705,15 @@ class LogVisualizer(QMainWindow):
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list(); self.cb_prod.clear(); self.cb_prod.addItems(products)
         self.cb_day.clear(); self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()]); self.cb_prod.blockSignals(False)
         self.cb_dash_prod.clear(); self.cb_dash_prod.addItems(['Overall'] + products)
+        for c in self.custom_curves.values():
+            try: self.p_m.removeItem(c)
+            except: pass
+            try: self.p_gen.removeItem(c)
+            except: pass
+        self.custom_curves = {}
+        self.data_settings = {}
+        self._apply_saved_settings()
+        self.btn_backtest.setVisible(self._is_backtest_log(path))
         self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._update_sandbox_table(); self._process_selection(); self._update_dashboard()
 
     def _update_sandbox_table(self):
@@ -674,7 +835,7 @@ class LogVisualizer(QMainWindow):
             else:
                 curve.setData([], [])
 
-        self.p_gen.setVisible(has_generic_data)
+        self.p_gen.setVisible(has_generic_data and not self._gen_pane_minimized)
         self.p_m.autoRange(); self.p_pnl.autoRange()
 
     def _update_dashboard(self):

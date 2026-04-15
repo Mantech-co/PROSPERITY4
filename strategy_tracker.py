@@ -869,6 +869,9 @@ class UploadTab(ttk.Frame):
 
     def _refresh_cards(self):
         m = self._metrics
+        if not m:
+            self._reset_cards()
+            return
         pnl_color = GREEN if m["total_pnl"] >= 0 else RED
         self._card_pnl.set(f"{m['total_pnl']:,.2f}", pnl_color)
         s_color = GREEN if m["sharpe"] >= 0 else RED
