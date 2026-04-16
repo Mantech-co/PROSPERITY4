@@ -88,7 +88,7 @@ pip install pyqt6 pyqtgraph polars numpy
 From workspace root:
 
 ```bash
-python dataviz/data_visualizer.py
+python data/data_visualizer.py
 ```
 
 The script tries a hardcoded data path first, then falls back to the current directory (`.`).
@@ -101,6 +101,6 @@ The script tries a hardcoded data path first, then falls back to the current dir
 
 ## File Layout
 
-- `dataviz/data_visualizer.py` - main application
-- `dataviz/prices_round_...csv` - input price data
-- `dataviz/trades_round_...csv` - input trade data
+- `data/data_visualizer.py` - main application
+- `data/prices_round_...csv` - input price data
+- `data/trades_round_...csv` - input trade data

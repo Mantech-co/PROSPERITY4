@@ -326,7 +326,7 @@ class LogVisualizer(QMainWindow):
         controls = QHBoxLayout(); controls.setContentsMargins(12, 12, 12, 12); controls.setSpacing(12)
         btn_open = QPushButton("📂 Open Log"); btn_open.clicked.connect(self._open_dialog); controls.addWidget(btn_open)
         self.btn_backtest = QPushButton("⟳ Refresh Backtest"); self.btn_backtest.clicked.connect(self._run_backtest); self.btn_backtest.setVisible(False); controls.addWidget(self.btn_backtest)
-        btn_import = QPushButton("📊 Import Data"); btn_import.clicked.connect(self._import_dataviz_data); controls.addWidget(btn_import)
+        btn_import = QPushButton("📊 Import Data"); btn_import.clicked.connect(self._import_data); controls.addWidget(btn_import)
         controls.addWidget(QLabel("Product:")); self.cb_prod = QComboBox(); controls.addWidget(self.cb_prod)
         controls.addWidget(QLabel("Day:")); self.cb_day = QComboBox(); controls.addWidget(self.cb_day)
         self.cb_prod.currentTextChanged.connect(self._process_selection); self.cb_day.currentTextChanged.connect(self._process_selection)
@@ -698,13 +698,13 @@ class LogVisualizer(QMainWindow):
         for ts in all_ts: rows.append(','.join([str(int(ts))] + [str(ts_map[k].get(ts, '')) for k in custom]))
         with open(path, 'w') as f: f.write('\n'.join(rows))
 
-    def _import_dataviz_data(self):
-        dataviz_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dataviz")
-        if not os.path.exists(dataviz_dir): return
+    def _import_data(self):
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+        if not os.path.exists(data_dir): return
         p_dfs, t_dicts = [], []
-        for f in os.listdir(dataviz_dir):
+        for f in os.listdir(data_dir):
             if not f.endswith('.csv'): continue
-            filepath = os.path.join(dataviz_dir, f)
+            filepath = os.path.join(data_dir, f)
             if f.startswith("prices_"): p_dfs.append(pl.read_csv(filepath, separator=";", null_values=['', 'nan']))
             elif f.startswith("trades_"):
                 day_match = re.search(r"day_(-?\d+)", f); df = pl.read_csv(filepath, separator=";", null_values=['', 'nan'])

@@ -220,16 +220,92 @@ class OsmiumStrategy(BaseStrategy):
 
 class PepperRootStrategy(BaseStrategy):
     PRODUCT = "INTARIAN_PEPPER_ROOT"
+    SLOPE = 0.00100253
+    MIN_HOLD_LIMIT = 75
+    MIN_DELTA = 5.5
+    EMPTY_BOOK_DELTA = 0
 
     def run(self, state_dict: Dict[str, Any]) -> List[Order]:
-        bid_wall, ask_wall = self.update_inertial_walls(state_dict)
-        if bid_wall is None or ask_wall is None:
-            return []
-        
-        # Simple Market Maker for Pepper Root
-        mid = (bid_wall + ask_wall) / 2.0
-        self.bid(round(bid_wall), self.limit, tag="MM_BID")
-        self.ask(round(ask_wall), self.limit, tag="MM_ASK")
+        od = self.order_depth
+        timestamp = self.state.timestamp
+
+        sell_orders = dict(od.sell_orders)
+        buy_orders = dict(od.buy_orders)
+
+        best_ask = min(sell_orders.keys()) if sell_orders else None
+        best_bid = max(buy_orders.keys()) if buy_orders else None
+
+        last_best_bid = state_dict.get("IPR_LAST_BID")
+        last_best_ask = state_dict.get("IPR_LAST_ASK")
+        ipr_start_mid = state_dict.get("IPR_START_MID")
+        ipr_start_ts = state_dict.get("IPR_START_TS")
+        micro_hist = state_dict.get("IPR_MICRO_HIST", [])
+        limit_reached = state_dict.get("IPR_LIMIT_REACHED", False)
+
+        # Empty book exploit
+        if best_ask is None and best_bid is None:
+            if last_best_bid is not None and last_best_ask is not None:
+                ask_capacity = max(0, self.current_pos - self.MIN_HOLD_LIMIT)
+                self.bid(last_best_bid - self.EMPTY_BOOK_DELTA, self.buy_capacity, tag="EMPTY_BID")
+                if ask_capacity > 0:
+                    self.ask(last_best_ask + self.EMPTY_BOOK_DELTA, ask_capacity, tag="EMPTY_ASK")
+            return self._consolidate()
+
+        if best_bid is not None:
+            state_dict["IPR_LAST_BID"] = best_bid
+        if best_ask is not None:
+            state_dict["IPR_LAST_ASK"] = best_ask
+
+        if ipr_start_mid is None:
+            if best_ask is not None and best_bid is not None:
+                ipr_start_mid = (best_bid + best_ask) / 2.0
+                ipr_start_ts = timestamp
+                state_dict["IPR_START_MID"] = ipr_start_mid
+                state_dict["IPR_START_TS"] = ipr_start_ts
+            else:
+                return self._consolidate()
+
+        # Aggressive buy phase
+        if not limit_reached:
+            if best_ask is not None:
+                ask_qty = -sell_orders[best_ask]
+                qty = min(ask_qty, self.buy_capacity)
+                if qty > 0:
+                    cap_before = self.buy_capacity
+                    self.bid(best_ask, qty, tag="AGG_BUY")
+                    buy_vol = cap_before - self.buy_capacity
+                    sell_orders[best_ask] += buy_vol
+                    if sell_orders[best_ask] >= 0:
+                        del sell_orders[best_ask]
+
+            if self.current_pos + (self.limit - self.buy_capacity - self.current_pos) >= self.limit or self.buy_capacity == 0:
+                state_dict["IPR_LIMIT_REACHED"] = True
+                limit_reached = True
+
+        new_best_bid = max(buy_orders.keys()) if buy_orders else None
+        new_best_ask = min(sell_orders.keys()) if sell_orders else None
+
+        ask_capacity = max(0, self.current_pos - self.MIN_HOLD_LIMIT)
+
+        if new_best_bid is not None and new_best_ask is not None:
+            bid_vol_qty = buy_orders[new_best_bid]
+            ask_vol_qty = abs(sell_orders[new_best_ask])
+            current_microprice = (new_best_bid * ask_vol_qty + new_best_ask * bid_vol_qty) / (bid_vol_qty + ask_vol_qty)
+
+            quote_bid = new_best_bid + 1
+            self.bid(quote_bid, self.buy_capacity, tag="MM_BID")
+
+            if limit_reached and len(micro_hist) == 5:
+                past_avg = sum(micro_hist) / 5.0
+                quote_ask = new_best_ask - 1
+                if ask_capacity > 0 and (quote_ask - past_avg) >= self.MIN_DELTA:
+                    self.ask(quote_ask, ask_capacity, tag="MM_ASK")
+
+            micro_hist.append(current_microprice)
+            if len(micro_hist) > 5:
+                micro_hist.pop(0)
+            state_dict["IPR_MICRO_HIST"] = micro_hist
+
         return self._consolidate()
 
 class IntarianRootStrategy(BaseStrategy):
@@ -284,9 +360,9 @@ class Trader:
             self.osmium_strat.reset(state)
             result["ASH_COATED_OSMIUM"] = self.osmium_strat.run(state_dict)
 
-        # if "INTARIAN_PEPPER_ROOT" in state.order_depths:
-        #     self.pepper_strat.reset(state)
-        #     result["INTARIAN_PEPPER_ROOT"] = self.pepper_strat.run(state_dict)
+        if "INTARIAN_PEPPER_ROOT" in state.order_depths:
+            self.pepper_strat.reset(state)
+            result["INTARIAN_PEPPER_ROOT"] = self.pepper_strat.run(state_dict)
 
         if "INTARIAN_ROOT" in state.order_depths:
             self.intarian_root_strat.reset(state)
