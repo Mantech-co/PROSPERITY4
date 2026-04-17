@@ -103,10 +103,14 @@ class Trader:
         self.params = TUNING_PARAMS
         self.strategies: Dict[str, BaseStrategy] = {
             # "PRODUCT": BaseStrategy(self.logger, self.params)
-        }
     
+        }
     def run(self, state: TradingState):
-        # self.logger.log(timestamp = state.timestamp)
+        if "ASH_COATED_OSMIUM" in state.order_depths:
+
+            self.logger.log(osmium = state.timestamp)
+        if "INTARIAN_PEPPER_ROOT" in state.order_depths:
+            self.logger.log(root = state.timestamp)
         result: Dict[str, List[Order]] = {}
         trader_data = state.traderData if state.traderData else "{}"
         try:

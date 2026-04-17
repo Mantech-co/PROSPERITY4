@@ -15,5 +15,6 @@ __pycache__/
 # Logs
 *.log
 
+manish/
 
 logviz/.logviz_settings.json

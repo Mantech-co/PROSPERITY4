@@ -1,16 +1,11 @@
-Linear combination of data, or just a quick way to plot anything, in post process
+Make buy hold template to get pnl based fair price
 
-Current tomatoes strategy placed orders based on market making, with a skewed order placement based on avellanada stoikov model
+fix visualizer plotting capped pixels for orderplacement
 
-- option to tag trades by strategy, for bifurication in debugging
+make boilerplate clear all orders and observe bot behaviour
 
-2 panes to overlay any data in main market view.
+api for submission and fetch result
 
-Strategy Ideas:
+add position and PnL as overlay on top of market view
 
-- Predict little momentum based on previous price action, and build/nett position accordingly
-
-
-Make tool for easily storing strategie, with performance, and sync with google sheets or smtg.
-
-
+reorganise codebase
