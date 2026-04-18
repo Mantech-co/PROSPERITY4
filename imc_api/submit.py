@@ -8,7 +8,6 @@ import argparse
 import asyncio
 import base64
 import json
-import os
 import shutil
 import sys
 import tempfile
@@ -22,12 +21,33 @@ API_BASE = "https://3dzqiahkw1.execute-api.eu-west-1.amazonaws.com/prod"
 POLL_INTERVAL = 30
 LOGIN_URL = "https://prosperity.imc.com/login"
 COGNITO_CLIENT_ID = "5kgp0jm69aeb91paqj1hnps838"
+COGNITO_ENDPOINT = "https://cognito-idp.eu-west-1.amazonaws.com/"
 
 
 def load_token():
     if AUTH_FILE.exists():
         return json.loads(AUTH_FILE.read_text()).get("token")
     return None
+
+
+def cognito_refresh(refresh_token):
+    body = json.dumps({
+        "AuthFlow": "REFRESH_TOKEN_AUTH",
+        "ClientId": COGNITO_CLIENT_ID,
+        "AuthParameters": {"REFRESH_TOKEN": refresh_token},
+    }).encode()
+    req = urllib.request.Request(
+        COGNITO_ENDPOINT,
+        data=body,
+        headers={
+            "Content-Type": "application/x-amz-json-1.1",
+            "X-Amz-Target": "AmazonCognitoIdentityProviderService.InitiateAuth",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read())
+    return data["AuthenticationResult"]["IdToken"]
 
 
 def save_token(token):
@@ -74,12 +94,19 @@ async def _playwright_login():
 
 
 def login_and_get_token():
-    print("Auth method: [1] Browser (Playwright)  [2] Paste token")
-    choice = input("Choose [1/2]: ").strip()
+    print("Auth method: [1] Browser (Playwright)  [2] Paste idToken  [3] Paste refreshToken")
+    choice = input("Choose [1/2/3]: ").strip()
     if choice == "2":
-        token = input("Paste Bearer token: ").strip()
+        print("Run in browser console on prosperity.imc.com, then navigate any page:")
+        print("  (()=>{const o=window.fetch;window.fetch=(...a)=>{const h=(a[1]?.headers||{});const t=h['authorization']||h['Authorization']||'';if(t.startsWith('Bearer '))console.log('TOKEN:',t.slice(7));return o(...a)}})()")
+        token = input("Paste idToken: ").strip()
         if token.startswith("Bearer "):
             token = token[len("Bearer "):]
+    elif choice == "3":
+        print("In DevTools: Network tab -> filter 'cognito' -> find InitiateAuth response -> copy RefreshToken from AuthenticationResult")
+        refresh_token = input("Paste refreshToken: ").strip()
+        print("Refreshing via Cognito...")
+        token = cognito_refresh(refresh_token)
     else:
         token = asyncio.run(_playwright_login())
     if not token:
@@ -207,9 +234,13 @@ def main():
     parser.add_argument("--round", type=int, default=2, help="Round ID for pre-submit check (default: 2)")
     parser.add_argument("--logs-dir", default="logs")
     parser.add_argument("--logviz-dir", default="logviz")
+    parser.add_argument("--token", help="Bearer token (skips login prompt)")
     args = parser.parse_args()
 
-    token = load_token()
+    if args.token:
+        token = args.token.removeprefix("Bearer ")
+    else:
+        token = load_token()
     if not token_valid(token):
         print("Token missing/expired, logging in...")
         token = login_and_get_token()
