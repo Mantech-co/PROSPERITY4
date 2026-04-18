@@ -18,3 +18,7 @@ __pycache__/
 manish/
 
 logviz/.logviz_settings.json
+
+.auth.json
+
+logs/
