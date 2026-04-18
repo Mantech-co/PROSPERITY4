@@ -91,7 +91,7 @@ def build_ob_heatmap(p_df, product, day, continuous_ts=False, buy_palette=None, 
         'rect': [times[0], times[-1], price_levels[0], price_levels[-1]]
     }
 
-def build_order_placement_heatmap(orders, product, day, times, price_levels, continuous_ts=False, min_day=0, buy_palette=None, sell_palette=None):
+def build_order_placement_heatmap(orders, product, day, times, continuous_ts=False, min_day=0, buy_palette=None, sell_palette=None):
     try:
         if day != 'All':
             day_val = int(day)
@@ -101,12 +101,24 @@ def build_order_placement_heatmap(orders, product, day, times, price_levels, con
     except:
         flt = [o for o in orders if (o['product'] == product or o['product'] == '')]
 
-    if not flt or len(times) == 0 or len(price_levels) == 0:
+    if not flt or len(times) == 0:
         return None
 
-    p_min = price_levels[0]
+    prices = [o['price'] for o in flt]
+    p_min_raw, p_max_raw = min(prices), max(prices)
+    prices_are_int = all(p == int(p) for p in prices)
+    if prices_are_int:
+        p_min = float(int(p_min_raw))
+        p_max = float(int(p_max_raw))
+        price_levels = np.arange(p_min, p_max + 1, dtype=float)
+        step = 1.0
+    else:
+        N_BINS = 500
+        price_levels = np.linspace(p_min_raw, p_max_raw, N_BINS)
+        p_min = p_min_raw
+        step = (p_max_raw - p_min_raw) / (N_BINS - 1) if N_BINS > 1 else 1.0
+
     h = len(price_levels)
-    step = (price_levels[-1] - price_levels[0]) / (h - 1) if h > 1 else 1.0
     w = len(times)
     img = np.zeros((h, w, 4), np.uint8)
 
@@ -123,7 +135,9 @@ def build_order_placement_heatmap(orders, product, day, times, price_levels, con
             continue
 
         x = ts_to_idx[ts]
-        y = int(np.clip(round((o['price'] - p_min) / step), 0, h - 1))
+        y = int(round((o['price'] - p_min) / step))
+        if y < 0 or y >= h:
+            continue
 
         side = o['side']
         vol = o['qty']
@@ -132,7 +146,7 @@ def build_order_placement_heatmap(orders, product, day, times, price_levels, con
         color = (buy_palette[lvl] if side == 'BUY' else sell_palette[lvl]) + [220]
         img[y, x] = color
 
-    return {'img': img}
+    return {'img': img, 'levels': price_levels}
 
 def get_rect(times, levels):
     if len(times) < 1 or len(levels) < 1:

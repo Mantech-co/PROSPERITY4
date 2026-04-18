@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QLineEdit,
     QScrollArea, QCheckBox, QDialog, QRadioButton, QButtonGroup, QGridLayout
 )
-from PyQt6.QtCore import QThread, pyqtSignal, QRectF, Qt
+from PyQt6.QtCore import QThread, pyqtSignal, QRectF, Qt, QEvent
 from PyQt6.QtGui import QShortcut, QKeySequence, QFont, QColor, QBrush
 
 from plotting_utils import build_ob_heatmap, build_order_placement_heatmap, get_rect
@@ -33,8 +33,8 @@ SELL_VOLUME_COLORS = [
 ]
 
 # ── Order Placement Heatmap Coloring ─────────────────────────────────────────
-ORDER_BUY_COLORS = [[0, 0, int(100 + i * 15.5)] for i in range(10)]
-ORDER_SELL_COLORS = [[int(100 + i * 15.5), 0, 0] for i in range(10)]
+ORDER_BUY_COLORS  = [[int(i * 5), int(100 + i * 15.5), int(i * 5)] for i in range(10)]
+ORDER_SELL_COLORS = [[int(100 + i * 15.5), int(i * 5), int(100 + i * 15.5)] for i in range(10)]
 
 # Palette for bot trade markers
 TRADE_VOLUME_COLORS = [
@@ -311,6 +311,10 @@ class LogVisualizer(QMainWindow):
         self.data_settings = {}
         self.markup_lines = []
         self.markup_enabled = False
+        self.tooltip_enabled = False
+        self.tooltip_frozen = False
+        self._freeze_lines = []
+        self._plot_t = None
         self.sandbox_msgs = {}
         self._current_log_path = None
         self._gen_pane_minimized = False
@@ -333,6 +337,7 @@ class LogVisualizer(QMainWindow):
         controls.addStretch()
         btn_setup = QPushButton("⚙️ Data Setup [S]"); btn_setup.clicked.connect(self._open_data_setup); controls.addWidget(btn_setup)
         self.lbl_markup = QLabel("MARKUP: OFF"); self.lbl_markup.setStyleSheet(f"color: {DIM}; font-weight: bold;"); controls.addWidget(self.lbl_markup)
+        self.lbl_tooltip = QLabel("TOOLTIP: OFF"); self.lbl_tooltip.setStyleSheet(f"color: {DIM}; font-weight: bold;"); controls.addWidget(self.lbl_tooltip)
         self.lbl_zoom = QLabel("Mode: XY"); self.lbl_zoom.setStyleSheet(f"color: {DIM};"); controls.addWidget(self.lbl_zoom)
         btn_export = QPushButton("💾 Export Custom CSV"); btn_export.clicked.connect(self._export_custom_csv); controls.addWidget(btn_export)
         main_layout.addLayout(controls)
@@ -342,14 +347,40 @@ class LogVisualizer(QMainWindow):
         self.hm_legend = HeatmapLegend(); market_layout.addWidget(self.hm_legend)
         self.gw_m = pg.GraphicsLayoutWidget(); self.gw_m.setBackground(BG); market_layout.addWidget(self.gw_m)
         self.tabs.addTab(market_container, "Market View")
+        # Info panel overlay on top of graph
+        self.info_panel = QFrame(self.gw_m)
+        self.info_panel.setStyleSheet(
+            f"QFrame {{ background-color: {PANEL_BG}; border: 1px solid {BORDER}; border-radius: 4px; }}"
+            f"QLabel {{ background: transparent; border: none; }}"
+            f"QScrollArea {{ background: transparent; border: none; }}"
+        )
+        _ip_scroll = QScrollArea(self.info_panel)
+        _ip_scroll.setWidgetResizable(True)
+        _ip_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _ip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _ip_scroll.setStyleSheet("background: transparent; border: none;")
+        self._info_label = QLabel()
+        self._info_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._info_label.setTextFormat(Qt.TextFormat.RichText)
+        self._info_label.setWordWrap(False)
+        self._info_label.setStyleSheet(
+            f"background: transparent; color: {TEXT}; font-family: 'JetBrains Mono', monospace; font-size: 8pt; padding: 6px 10px;"
+        )
+        _ip_scroll.setWidget(self._info_label)
+        _ip_layout = QVBoxLayout(self.info_panel)
+        _ip_layout.setContentsMargins(0, 0, 0, 0)
+        _ip_layout.addWidget(_ip_scroll)
+        self.info_panel.setFixedWidth(265)
+        self.info_panel.setVisible(False)
+        self.gw_m.installEventFilter(self)
         self.p_m = self.gw_m.addPlot(row=0, col=0); self.p_m.showGrid(x=True, y=True, alpha=0.3); self.p_m.setDownsampling(auto=True, mode='peak')
         self.p_gen = self.gw_m.addPlot(row=1, col=0); self.p_gen.showGrid(x=True, y=True, alpha=0.3); self.p_gen.setFixedHeight(200); self.p_gen.setXLink(self.p_m); self.p_gen.hideAxis('bottom'); self.p_gen.addLegend()
         self.img_item = pg.ImageItem(); self.img_item.setZValue(0); self.p_m.addItem(self.img_item)
         self.img_orders = pg.ImageItem(); self.img_orders.setZValue(1); self.p_m.addItem(self.img_orders); self.img_orders.setVisible(False)
         self.curve_mid = self.p_m.plot(pen=pg.mkPen(ACCENT_CYAN, width=2), name="Mid Price", clipToView=True)
-        self.sc_bot = pg.ScatterPlotItem(symbol='x', size=7, brush=ACCENT_WHITE, name="Bot Trades")
-        self.sc_buy = pg.ScatterPlotItem(symbol='t1', size=10, brush=ACCENT_CYAN, name="My Buy")
-        self.sc_sell = pg.ScatterPlotItem(symbol='t', size=10, brush=ACCENT_ORANGE, name="My Sell")
+        self.sc_bot = pg.ScatterPlotItem(symbol='x', size=7, brush=ACCENT_WHITE, name="Bot Trades"); self.sc_bot.setZValue(2)
+        self.sc_buy = pg.ScatterPlotItem(symbol='t1', size=10, brush=ACCENT_CYAN, name="My Buy"); self.sc_buy.setZValue(3)
+        self.sc_sell = pg.ScatterPlotItem(symbol='t', size=10, brush=ACCENT_ORANGE, name="My Sell"); self.sc_sell.setZValue(3)
         for item in [self.sc_bot, self.sc_buy, self.sc_sell]: self.p_m.addItem(item)
         self.leg_m = InteractiveLegendItem(offset=(10, 10)); self.leg_m.setParentItem(self.p_m.graphicsItem())
         self._heatmap_proxy = pg.PlotDataItem(pen=None, brush=pg.mkBrush(ACCENT_PURPLE))
@@ -391,13 +422,13 @@ class LogVisualizer(QMainWindow):
         self.logs_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); self.logs_table.verticalHeader().setVisible(False); logs_layout.addWidget(self.logs_table)
         self.tabs.addTab(logs_container, "Logs")
 
-        self.data_strip = QLabel("Ready"); self.data_strip.setObjectName("DataStrip"); self.data_strip.setFixedHeight(32); main_layout.addWidget(self.data_strip)
-
         QShortcut(QKeySequence("X"), self).activated.connect(lambda: self._set_zoom("x"))
         QShortcut(QKeySequence("Y"), self).activated.connect(lambda: self._set_zoom("y"))
         QShortcut(QKeySequence("Z"), self).activated.connect(lambda: self._set_zoom("xy"))
         QShortcut(QKeySequence("A"), self).activated.connect(self._autoscale_all)
         QShortcut(QKeySequence("M"), self).activated.connect(self._toggle_markup)
+        QShortcut(QKeySequence("T"), self).activated.connect(self._toggle_tooltip)
+        QShortcut(QKeySequence("Shift+T"), self).activated.connect(self._freeze_tooltip)
         QShortcut(QKeySequence("Shift+M"), self).activated.connect(self._toggle_gen_pane)
         QShortcut(QKeySequence("C"), self).activated.connect(self._clear_markup)
         QShortcut(QKeySequence("S"), self).activated.connect(self._open_data_setup)
@@ -491,6 +522,8 @@ class LogVisualizer(QMainWindow):
             ("Z",       "Zoom XY (reset)"),
             ("A",       "Autoscale all plots"),
             ("M",       "Toggle markup mode"),
+            ("T",       "Toggle info panel (tooltip)"),
+            ("Shift+T", "Freeze tooltip at current coordinates"),
             ("Shift+M", "Toggle secondary (gen) pane"),
             ("C",       "Clear markup lines"),
             ("S",       "Open Data Setup"),
@@ -585,6 +618,53 @@ class LogVisualizer(QMainWindow):
         self.btn_backtest.setText("⟳ Refresh Backtest")
         QMessageBox.warning(self, "Backtest Error", msg)
 
+    def eventFilter(self, obj, event):
+        if obj is self.gw_m and event.type() == QEvent.Type.Resize:
+            self._reposition_info_panel()
+        return super().eventFilter(obj, event)
+
+    def _reposition_info_panel(self):
+        if not hasattr(self, 'info_panel'): return
+        panel_h = max(40, self.gw_m.height() - 20)
+        self.info_panel.setFixedHeight(panel_h)
+        x = self.gw_m.width() - self.info_panel.width() - 58
+        self.info_panel.move(x, 8)
+
+    def _toggle_tooltip(self):
+        self.tooltip_enabled = not self.tooltip_enabled
+        self._update_tooltip_label()
+        if self.tooltip_enabled:
+            self._reposition_info_panel()
+            self.info_panel.setVisible(True)
+        else:
+            self.info_panel.setVisible(False)
+
+    def _freeze_tooltip(self):
+        if not self.tooltip_enabled: return
+        self.tooltip_frozen = not self.tooltip_frozen
+        self._update_tooltip_label()
+        if self.tooltip_frozen:
+            freeze_pen = pg.mkPen('#4488ff', width=1, style=Qt.PenStyle.DashLine)
+            vl = pg.InfiniteLine(pos=self.v_line.value(), angle=90, movable=False, pen=freeze_pen)
+            hl = pg.InfiniteLine(pos=self.h_line.value(), angle=0, movable=False, pen=freeze_pen)
+            self.p_m.addItem(vl); self.p_m.addItem(hl)
+            self._freeze_lines = [vl, hl]
+        else:
+            for item in self._freeze_lines:
+                self.p_m.removeItem(item)
+            self._freeze_lines = []
+
+    def _update_tooltip_label(self):
+        if not self.tooltip_enabled:
+            self.lbl_tooltip.setText("TOOLTIP: OFF")
+            self.lbl_tooltip.setStyleSheet(f"color: {DIM}; font-weight: bold;")
+        elif self.tooltip_frozen:
+            self.lbl_tooltip.setText("TOOLTIP: FROZEN")
+            self.lbl_tooltip.setStyleSheet(f"color: {ACCENT_GOLD}; font-weight: bold;")
+        else:
+            self.lbl_tooltip.setText("TOOLTIP: ON")
+            self.lbl_tooltip.setStyleSheet(f"color: {ACCENT_CYAN}; font-weight: bold;")
+
     def _toggle_markup(self):
         self.markup_enabled = not self.markup_enabled
         self.lbl_markup.setText(f"MARKUP: {'ON' if self.markup_enabled else 'OFF'}")
@@ -665,16 +745,116 @@ class LogVisualizer(QMainWindow):
         if not self.p_m.sceneBoundingRect().contains(pos) or self.current_df is None: return
         mouse_point = self.p_m.vb.mapSceneToView(pos)
         x, y = mouse_point.x(), mouse_point.y()
-        ts_array = self.current_df['timestamp'].to_numpy()
-        idx = np.clip(np.searchsorted(ts_array, x), 0, len(ts_array) - 1)
-        row = self.current_df.row(idx, named=True); ts_val = int(row['timestamp'])
-        info = f"TS: {ts_val}  |  MID: {row.get('mid_price',0):,.1f}  |  PnL: {row.get('profit_and_loss',0):,.0f}"
+
+        plot_t = self._plot_t if self._plot_t is not None else self.current_df['timestamp'].to_numpy()
+        idx = int(np.clip(np.searchsorted(plot_t, x), 0, len(plot_t) - 1))
+        ts_plot = plot_t[idx]
+
+        row = self.current_df.row(idx, named=True)
+        raw_ts = int(row['timestamp'])
+        row_day = row.get('day', None)
+        mid = row.get('mid_price', 0) or 0
+        pnl = row.get('profit_and_loss', 0) or 0
+
+        self.v_line.setPos(ts_plot); self.h_line.setPos(y)
+
+        if not self.tooltip_enabled: return
+        if self.tooltip_frozen: return
+
+        lines = []
+        def h(color, text): return f'<span style="color:{color}">{text}</span>'
+        def sec(title): lines.append(h(ACCENT_CYAN, f'<b>{title}</b>'))
+        def row_line(label, val, color=TEXT): lines.append(f'&nbsp;&nbsp;{h(color, label)}&nbsp;{val}')
+
+        # Cursor
+        sec('CURSOR')
+        row_line('TS    :', str(raw_ts))
+        row_line('Price :', f'{y:.2f}')
+        lines.append('')
+
+        # Market
+        sec('MARKET')
+        row_line('Mid   :', f'{mid:,.2f}')
+        row_line('PnL   :', f'{pnl:,.0f}', ACCENT_GREEN if pnl >= 0 else ACCENT_RED)
+        lines.append('')
+
+        # Orderbook from prices_df row
+        bid_p_cols = sorted([c for c in self.current_df.columns if 'bid_price_' in c], key=lambda c: int(c.split('_')[-1]))
+        ask_p_cols = sorted([c for c in self.current_df.columns if 'ask_price_' in c], key=lambda c: int(c.split('_')[-1]))
+        if bid_p_cols or ask_p_cols:
+            sec('ORDERBOOK')
+            for pc in reversed(ask_p_cols):
+                lvl = pc.split('_')[-1]; vc = f'ask_volume_{lvl}'
+                p = row.get(pc); v = row.get(vc)
+                if p and v: row_line(f'ASK{lvl}', f'{p:.0f} &times; {int(v)}', ACCENT_ORANGE)
+            lines.append(f'&nbsp;&nbsp;{h(DIM, "&#9472;" * 16)}')
+            for pc in bid_p_cols:
+                lvl = pc.split('_')[-1]; vc = f'bid_volume_{lvl}'
+                p = row.get(pc); v = row.get(vc)
+                if p and v: row_line(f'BID{lvl}', f'{p:.0f} &times; {int(v)}', ACCENT_CYAN)
+            lines.append('')
+
+        # OB heatmap volume at cursor
         if self.ob_res:
-            y_levels = self.ob_res['levels']; y_idx = np.searchsorted(y_levels, y)
-            if 0 <= y_idx < len(y_levels):
-                vol = self.ob_res['raw_vol'][y_idx, idx]
-                if vol > 0: info += f"  |  VOL @ {y_levels[y_idx]:.0f}: {vol:,.0f}"
-        self.v_line.setPos(ts_val); self.h_line.setPos(y); self.data_strip.setText(info)
+            y_levels = self.ob_res['levels']
+            y_idx = int(np.clip(np.searchsorted(y_levels, y), 0, len(y_levels) - 1))
+            vol = self.ob_res['raw_vol'][y_idx, idx]
+            if vol > 0:
+                sec('OB HEATMAP')
+                row_line(f'Vol @ {y_levels[y_idx]:.0f}', f':{vol:,.0f}')
+                lines.append('')
+
+        # Order placements at this ts
+        prod = self.cb_prod.currentText()
+        day_sel = self.cb_day.currentText()
+        orders_here = [o for o in self.data.get('orders', []) if o['ts'] == raw_ts
+                       and (o.get('product', '') in ('', prod))
+                       and (row_day is None or o.get('day', row_day) == row_day)]
+        if orders_here:
+            sec('ORDERS PLACED')
+            for o in orders_here:
+                col = ACCENT_CYAN if o['side'] == 'BUY' else ACCENT_ORANGE
+                tag = o.get('tag', '')
+                row_line(o['side'], f'{o["price"]:.0f} &times; {o["qty"]}  [{tag}]', col)
+            lines.append('')
+
+        # Trades at this ts
+        trades_here = []
+        for tr in self.data.get('trades', []):
+            if tr.get('symbol') != prod: continue
+            if day_sel != 'All' and 'day' in tr and str(tr['day']) != day_sel: continue
+            if tr.get('timestamp') == raw_ts and (row_day is None or tr.get('day', row_day) == row_day):
+                trades_here.append(tr)
+        if trades_here:
+            sec('TRADES')
+            for tr in trades_here:
+                is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+                is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+                qty = tr.get('quantity', 0); pr = tr.get('price', 0)
+                if is_b: row_line('MY BUY ', f'{pr} &times; {qty}', ACCENT_CYAN)
+                elif is_s: row_line('MY SELL', f'{pr} &times; {qty}', ACCENT_ORANGE)
+                else: row_line('BOT    ', f'{pr} &times; {qty}', DIM)
+            lines.append('')
+
+        # Custom data
+        custom = self.data.get('custom', {})
+        if custom:
+            sec('CUSTOM DATA')
+            for i, (name, pts) in enumerate(custom.items()):
+                if not pts: continue
+                ts_arr = np.array([p[0] for p in pts])
+                ci = int(np.clip(np.searchsorted(ts_arr, x), 0, len(ts_arr) - 1))
+                val = pts[ci][1]
+                color = CUSTOM_COLORS[i % len(CUSTOM_COLORS)]
+                row_line(name, f': {val:.5g}', color)
+
+        html = (
+            f'<div style="font-family:\'JetBrains Mono\',\'Consolas\',monospace;'
+            f'font-size:8pt;line-height:1.5;">' + '<br>'.join(lines) + '</div>'
+        )
+        self._info_label.setText(html)
+        self._reposition_info_panel()
+        self.info_panel.setVisible(True)
 
     def _set_zoom(self, mode):
         self.lbl_zoom.setText(f"Mode: {mode.upper()}"); self.p_m.setMouseEnabled(x=(mode in ['x', 'xy']), y=(mode in ['y', 'xy']))
@@ -823,6 +1003,7 @@ class LogVisualizer(QMainWindow):
         cont_ts = self.data.get('_continuous_ts', False); min_day = self.data.get('_min_day', 0)
         t = self.current_df['timestamp'].to_numpy()
         if day == 'All' and 'day' in self.current_df.columns and not cont_ts: t = t + (self.current_df['day'].to_numpy() - min_day) * 1000000
+        self._plot_t = t
         mid = self.current_df['mid_price'].to_numpy(); self.curve_mid.setData(t, mid)
         pnl_data = self.current_df['profit_and_loss'].to_numpy() if 'profit_and_loss' in self.current_df.columns else np.zeros(len(t))
         self.curve_pnl.setData(t, pnl_data)
@@ -853,10 +1034,10 @@ class LogVisualizer(QMainWindow):
             self.img_item.setImage(self.ob_res['img'], autoLevels=False)
             self.img_item.setRect(get_rect(t, self.ob_res['levels']))
             self.img_item.setVisible(True)
-            o_res = build_order_placement_heatmap(self.data.get('orders',[]), prod, day, t, self.ob_res['levels'], cont_ts, min_day, ORDER_BUY_COLORS, ORDER_SELL_COLORS)
+            o_res = build_order_placement_heatmap(self.data.get('orders',[]), prod, day, t, cont_ts, min_day, ORDER_BUY_COLORS, ORDER_SELL_COLORS)
             if o_res:
                 self.img_orders.setImage(o_res['img'], autoLevels=False)
-                self.img_orders.setRect(get_rect(t, self.ob_res['levels']))
+                self.img_orders.setRect(get_rect(t, o_res['levels']))
             else: self.img_orders.clear()
             self.hm_legend.update_ranges(self.ob_res['max_vol'], q_edges)
         else: self.img_item.setVisible(False); self.img_orders.clear()

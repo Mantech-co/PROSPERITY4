@@ -2,8 +2,4 @@ Make buy hold template to get pnl based fair price
 
 fix visualizer plotting capped pixels for orderplacement
 
-make boilerplate clear all orders and observe bot behaviour
-
 add position and PnL as overlay on top of market view
-
-reorganise codebase
