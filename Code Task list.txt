@@ -4,8 +4,6 @@ fix visualizer plotting capped pixels for orderplacement
 
 make boilerplate clear all orders and observe bot behaviour
 
-api for submission and fetch result
-
 add position and PnL as overlay on top of market view
 
 reorganise codebase

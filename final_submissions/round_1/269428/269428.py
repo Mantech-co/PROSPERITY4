@@ -56,7 +56,7 @@ class Trader:
         self.slope = 0.00100253
         self.min_hold_limit = 75
         self.min_delta = 5.5
-        self.empty_book_delta = 100  # Hyperparameter for empty book spread
+        self.empty_book_delta = 110  # Hyperparameter for empty book spread
         
         # --- ACO Strategy Parameters ---
         self.delta = 90 # Hyperparameter for empty book spread
@@ -120,6 +120,24 @@ class Trader:
             if position + buy_vol >= limit:
                 self.ipr_limit_reached = True
 
+        # --- BUYBACK TO MIN HOLD LIMIT ---
+        # If position dropped below min_hold_limit (e.g. outlier ask filled), buy back
+        if sell_orders and position < self.min_hold_limit:
+            needed = self.min_hold_limit - position
+            for ask_price in sorted(sell_orders.keys()):
+                if needed <= 0:
+                    break
+                available = -sell_orders[ask_price]
+                qty = min(available, needed, limit - position - buy_vol)
+                if qty > 0:
+                    orders.append(Order(product, ask_price, qty))
+                    self.logger.log_order(product, "BUY", ask_price, qty, "BUYBACK")
+                    buy_vol += qty
+                    needed -= qty
+                    sell_orders[ask_price] += qty
+                    if sell_orders[ask_price] >= 0:
+                        del sell_orders[ask_price]
+
         new_best_bid = max(buy_orders.keys()) if buy_orders else self.last_best_bid
         new_best_ask = min(sell_orders.keys()) if sell_orders else self.last_best_ask
 
@@ -161,16 +179,21 @@ class Trader:
             if sell_orders:
                 quote_ask = new_best_ask - 1           # Competition exists: Overcut
                 ask_tag = "REST_ASK"
+                # Post-limit phase asks (only if min_delta above reference)
+                if self.ipr_limit_reached and len(self.ipr_microprice_history) == 5:
+                    past_avg_microprice = sum(self.ipr_microprice_history) / 5.0
+                    if ask_capacity > 0 and (quote_ask - past_avg_microprice) >= self.min_delta:
+                        orders.append(Order(product, int(quote_ask), -ask_capacity))
+                        self.logger.log_order(product, "SELL", int(quote_ask), ask_capacity, ask_tag)
             else:
                 quote_ask = new_best_ask + self.empty_book_delta  # No competition: Widen spread up
                 ask_tag = "NO_COMP_ASK"
-
-            # Post-limit phase asks (only if min_delta above reference)
-            if self.ipr_limit_reached and len(self.ipr_microprice_history) == 5:
-                past_avg_microprice = sum(self.ipr_microprice_history) / 5.0
-                if ask_capacity > 0 and (quote_ask - past_avg_microprice) >= self.min_delta:
-                    orders.append(Order(product, int(quote_ask), -ask_capacity))
-                    self.logger.log_order(product, "SELL", int(quote_ask), ask_capacity, ask_tag)
+                # Empty ask book: outlier ask at max volume ignoring min_hold_limit
+                if self.ipr_limit_reached:
+                    empty_ask_capacity = limit + (position - sell_vol)
+                    if empty_ask_capacity > 0:
+                        orders.append(Order(product, int(quote_ask), -empty_ask_capacity))
+                        self.logger.log_order(product, "SELL", int(quote_ask), empty_ask_capacity, ask_tag)
 
         return orders
 
