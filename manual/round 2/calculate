@@ -1,0 +1,13 @@
+from optimal_allocation_discrete import optimal_allocation
+import csv
+f = open("distribution_xw.csv", 'r')
+a = csv.reader(f)
+k = {}
+for i in a:
+	k[i[0]] = i[1]
+k.pop('x')
+m = {}
+for a, b in k.items():
+	m[float(a)] = float(b)
+res = optimal_allocation(bid_weights=m, verbose=True)
+print(res)

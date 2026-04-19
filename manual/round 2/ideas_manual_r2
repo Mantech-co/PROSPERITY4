@@ -1,0 +1,34 @@
+1. consider chatGPT and claude first run answers
+2. suggest prompts and get second round answers
+3. analyse how many people use claude and chatGPT in crowd using data
+4. check likely people to have claude premium from data of manual
+5. spikes in manual profit likely refer to direct answers from LLM
+6. nice numbers
+7. small section of people who will do everything i have done
+8. someone who got good in algo but not manual is highly likely to be using claude
+
+
+
+
+distribution:
+- 521 ppl use claude
+- 17327 people didn't answer
+- assume 90% of these don't answer again (they are putting 0)
+10% of these go into AI category
+- 255+118+145 people are somehow clustured as a normal distribution with a flat curve (maybe another AI)
+- 1790 people have applied brain
+- 123 people have applied wrong brain
+-- 4803 people have done something, in which 2952 people have done above things
+- so, 1851 people are distributed as noise
+assum 20% of these go to ai buckets
+rest are noise
+
+that gives:
+15595 people who will put 0 (subject to noise)
+706 people who will use claude - claude is saying put 0.36 rounded as 30. Say 70% (495) put 0.36 and 30% (211) put 0.3
+assume 80% people put claude answer as it is, and 20% are distributed on the tail (skew normal distribution) cuz they figure that at the loss of slightly higher bid they will get better rank.
+703 people use chatGPT (some other AI), 80% put as it is, 20% put slightly higher - chatgpt says 0.3
+1790 pppl who applied brain - say 15% thought it was best to settle for 0 and 5% thought to put a high number (0.8)and optimise on other two parameters, 10% of people are doing what i am doing (at the end calculate best distribution and distribute these 20% with skew normal around that), 35% (627) put 0.4, 35% (627) put 0.8
+123 people put 0.5 - skew normal
+1480 people put nice numbers
+1733 as absolute noise
