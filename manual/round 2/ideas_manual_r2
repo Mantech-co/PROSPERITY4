@@ -24,11 +24,26 @@ assum 20% of these go to ai buckets
 rest are noise
 
 that gives:
-15595 people who will put 0 (subject to noise)
-706 people who will use claude - claude is saying put 0.36 rounded as 30. Say 70% (495) put 0.36 and 30% (211) put 0.3
-assume 80% people put claude answer as it is, and 20% are distributed on the tail (skew normal distribution) cuz they figure that at the loss of slightly higher bid they will get better rank.
-703 people use chatGPT (some other AI), 80% put as it is, 20% put slightly higher - chatgpt says 0.3
-1790 pppl who applied brain - say 15% thought it was best to settle for 0 and 5% thought to put a high number (0.8)and optimise on other two parameters, 10% of people are doing what i am doing (at the end calculate best distribution and distribute these 20% with skew normal around that), 35% (627) put 0.4, 35% (627) put 0.8
-123 people put 0.5 - skew normal
-1480 people put nice numbers
-1733 as absolute noise
+706 [0.108] people who will use claude - claude is saying put 0.36 rounded as 30. Say 70% (495) [0.0757] put 0.36 and 30% (211) [0.0323] put 0.3
+assume 80% [0.0861] people put claude answer as it is, and 20% [0.0215] are distributed on the tail (skew normal distribution) cuz they figure that at the loss of slightly higher bid they will get better rank.
+703 [0.1077] people use chatGPT (some other AI), 80% [0.0861] put as it is, 20% [0.0215] put slightly higher - chatgpt says 0.3
+1790 [0.274] pppl who applied brain - say 15% [0.0411] thought it was best to settle for 0 and 5% [0.0137] thought to put a high number (0.8)and optimise on other two parameters, 10% [0.0274] of people are doing what i am doing (at the end calculate best distribution and distribute these 20% with skew normal nd that), 50% (895) [0.1377] put 0.4, 20% (358) [0.0543] put 0.8
+123 [0.0189] people put 0.5 - skew normal
+1480 [0.2269] people put nice numbers
+1733 [0.2656] as absolute noise
+
+
+0.0757 - normal about 36
+0.0323 - normal about 30
+0.1077 - normal about 30
+0.0411 - skew-normal fat right about 0
+0.0137 - normal about 80
+0.096 - normal about 40
+0.096 - normal about 80
+0.0189 - skew-normal with fatter right about 50
+0.2269 - normal distributions on all multiples of 10
+0.2656 - uniform noise
+0.1064 - skew-normal with fat left about 26.03
+
+
+# 0.0274 - normal about 40, 80

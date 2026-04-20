@@ -1,1 +1,15 @@
 add position and PnL as overlay on top of market view
+
+fix pnl classification
+
+Integrate submission and opening log
+- confirm dialogue mentioning file path about to submit
+- status update (n seconds since refresh)
+
+product specific pnl
+
+strategy specific pnl
+strategy filtered trades
+strategy filtered order placement
+
+extract .csv files from result log for backtesting
