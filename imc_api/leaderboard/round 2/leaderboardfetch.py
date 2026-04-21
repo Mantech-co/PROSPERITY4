@@ -4,7 +4,7 @@ url = "https://3dzqiahkw1.execute-api.eu-west-1.amazonaws.com/prod/leaderboard"
 
 def params(i):
     return {
-    "type": "OVERALL",
+    "type": "MANUAL",
     "page": i,
     "limit": 100
 }
@@ -24,21 +24,18 @@ headers = {
     "X-Requested-With": "XMLHttpRequest"
 }
 
-# f = open("leaderboard_data_manual.csv", 'a')
-# writer = csv.writer(f)
-for  i in range(1):
+f = open("leaderboard_data_overall.csv", 'a')
+writer = csv.writer(f)
+for  i in range(222):
     response = requests.get(url, params=params(i+1), headers=headers)
-    print(response.status_code)
+
     if response.status_code == 200:
         data = response.json()
         data = data['data']['items']
-
-        print(data)
-        
         for k in data:
-            print([k["position"], k["positionChange"], k["team"]["id"], k["team"]["name"], k["team"]["countryCode"], k["score"]])
+            writer.writerow([k["position"], k["positionChange"], k["team"]["id"], k["team"]["name"], k["team"]["countryCode"], k["score"]])
     else:
         print(f"Error: {response.status_code}")
     print("Page", i+1, "done")
-# f.flush()
-# f.close()
+f.flush()
+f.close()
