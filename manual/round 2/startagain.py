@@ -12,6 +12,17 @@ def scale(x):
 _i_vals = np.arange(1, 10001) / 100
 _speed_func_vals = distribution.mixture_cdf(_i_vals) * 0.8 + 0.1
 
+data = [{"speed":0,"players":453},{"speed":1.00,"players":125},{"speed":2.00,"players":84},{"speed":3.00,"players":52},{"speed":4.00,"players":27},{"speed":5.00,"players":129},{"speed":6.00,"players":27},{"speed":7.00,"players":31},{"speed":8.00,"players":30},{"speed":9.00,"players":12},{"speed":10.0,"players":249},{"speed":11.00,"players":53},{"speed":12.00,"players":29},{"speed":13.00,"players":17},{"speed":14.00,"players":5},{"speed":15.00,"players":137},{"speed":16.00,"players":35},{"speed":17.00,"players":22},{"speed":18.00,"players":23},{"speed":19.00,"players":13},{"speed":20.0,"players":281},{"speed":21.00,"players":78},{"speed":22.00,"players":44},{"speed":23.00,"players":33},{"speed":24.00,"players":22},{"speed":25.00,"players":172},{"speed":26.00,"players":63},{"speed":27.00,"players":54},{"speed":28.00,"players":22},{"speed":29.00,"players":14},{"speed":30.0,"players":242},{"speed":31.00,"players":57},{"speed":32.00,"players":42},{"speed":33.00,"players":68},{"speed":34.00,"players":99},{"speed":34.0100,"players":1},{"speed":35.00,"players":155},{"speed":36.00,"players":184},{"speed":37.00,"players":118},{"speed":38.00,"players":75},{"speed":39.00,"players":37},{"speed":40.0,"players":227},{"speed":41.00,"players":139},{"speed":42.00,"players":119},{"speed":42.100,"players":1},{"speed":43.00,"players":89},{"speed":44.00,"players":40},{"speed":45.00,"players":100},{"speed":46.00,"players":69},{"speed":47.00,"players":42},{"speed":48.00,"players":20},{"speed":49.00,"players":14},{"speed":50.0,"players":86},{"speed":51.00,"players":62},{"speed":52.00,"players":56},{"speed":53.00,"players":40},{"speed":54.00,"players":22},{"speed":55.00,"players":33},{"speed":56.00,"players":21},{"speed":57.00,"players":17},{"speed":58.00,"players":17},{"speed":59.00,"players":4},{"speed":60.0,"players":30},{"speed":61.00,"players":14},{"speed":61.100,"players":1},{"speed":62.00,"players":3},{"speed":63.00,"players":7},{"speed":64.00,"players":8},{"speed":65.00,"players":9},{"speed":66.00,"players":5},{"speed":67.00,"players":4},{"speed":68.00,"players":3},{"speed":69.00,"players":3},{"speed":70.0,"players":8},{"speed":71.00,"players":9},{"speed":72.00,"players":2},{"speed":74.00,"players":1},{"speed":75.00,"players":1},{"speed":76.00,"players":1},{"speed":77.00,"players":2},{"speed":78.00,"players":1},{"speed":79.00,"players":1},{"speed":80.0,"players":4},{"speed":81.00,"players":2},{"speed":85.00,"players":1},{"speed":90.0,"players":1},{"speed":91.00,"players":1},{"speed":100,"players":2}]
+data_sorted = sorted(data, key=lambda x: x['speed'])
+emp_spd = np.array([d['speed'] for d in data_sorted])
+emp_cum = np.cumsum([d['players'] for d in data_sorted])
+empirical_cdf = emp_cum / emp_cum[-1]
+
+def get_empirical_prob(s):
+    idx = np.searchsorted(emp_spd, s, side='right') - 1
+    idx = np.maximum(idx, 0)
+    return empirical_cdf[idx] * 0.8 + 0.1
+
 def speed_func(i_hundredths_idx):
     return _speed_func_vals[i_hundredths_idx - 1]
 """
@@ -114,25 +125,29 @@ best_pnls = []
 worst_pnls = []
 risktoreward = []
 prediction = []
+empirical_prediction = []
 
 for i in range(1, 10001):
     iv = i / 100
     x = solve(iv)
     worst_pnl = 0.1*research(x)*scale(iv-x) - 50000
     best_pnl = 0.9*research(x)*scale(iv-x) - 50000
-    predicted = speed_func(100-i)*research(x)*scale(iv-x) - 50000
+    predicted = speed_func(10000-i)*research(x)*scale(iv-x) - 50000
+    emp_pred = get_empirical_prob(100-iv)*research(x)*scale(iv-x) - 50000
 
     speed.append(100-iv)
     best_pnls.append(best_pnl)
     worst_pnls.append(worst_pnl)
     risktoreward.append(max(0, predicted/(-1*worst_pnl)))
     prediction.append(predicted)
+    empirical_prediction.append(emp_pred)
 
-print(speed_func(27)*scale(73-solve(73))*research(solve(73))-50000)
+print(speed_func(7300)*scale(73-solve(73))*research(solve(73))-50000)
 
 speed_arr = np.array(speed)
 best_arr = np.array(best_pnls)
 worst_arr = np.array(worst_pnls)
+emp_pred_arr = np.array(empirical_prediction)
 
 def zero_crossing(x, y):
     idx = np.where(np.diff(np.sign(y)))[0][0]
@@ -157,10 +172,15 @@ pred_max_idx = np.argmax(pred_arr)
 pred_max_x = speed_arr[pred_max_idx]
 pred_max_y = pred_arr[pred_max_idx]
 
-fig, ax1 = plt.subplots()
+emp_pred_max_idx = np.argmax(emp_pred_arr)
+emp_pred_max_x = speed_arr[emp_pred_max_idx]
+emp_pred_max_y = emp_pred_arr[emp_pred_max_idx]
+
+fig, ax1 = plt.subplots(figsize=(10,6))
 ax1.plot(speed, best_pnls, label="Best PnL")
 ax1.plot(speed, worst_pnls, label="Worst PnL")
-ax1.plot(speed, prediction, label="Predicted PnL")
+ax1.plot(speed, prediction, label="Predicted PnL (Model)")
+ax1.plot(speed, empirical_prediction, label="Empirical Predicted PnL", color='cyan', linewidth=2)
 ax1.axhline(y=0, color='r', linestyle='-')
 ax1.set_ylabel("PnL")
 ax1.axhline(y=h_val, color='gray', linestyle='--', label=f"Worst PnL @ speed=0")
@@ -169,12 +189,20 @@ ax1.axvline(x=best_zero, color='red', linestyle='--', label="Best PnL = 0")
 ax1.axvline(x=worst_zero, color='red', linestyle=':', label="Worst PnL = 0")
 ax1.axvline(x=rr_max_x, color='green', linestyle='--', label="Max Risk/Reward")
 ax1.axvline(x=rr_zero, color='hotpink', linestyle='-', label="Risk/Reward = 0")
-ax1.axvline(x=pred_max_x, color='darkorange', linestyle='--', label='Max Predicted PnL')
+ax1.axvline(x=pred_max_x, color='darkorange', linestyle='--', label='Max Predicted PnL (Model)')
 ax1.annotate(f"({pred_max_x:.2f}, {pred_max_y:.0f})",
              xy=(pred_max_x, pred_max_y),
              xytext=(pred_max_x + 2, pred_max_y - 5000),
              color='red',
              arrowprops=dict(arrowstyle='->', color='red'))
+
+ax1.axvline(x=emp_pred_max_x, color='cyan', linestyle='--', label='Max Empirical Predicted PnL')
+ax1.annotate(f"Empirical: ({emp_pred_max_x:.2f}, {emp_pred_max_y:.0f})",
+             xy=(emp_pred_max_x, emp_pred_max_y),
+             xytext=(emp_pred_max_x + 2, emp_pred_max_y + 10000),
+             color='cyan',
+             arrowprops=dict(arrowstyle='->', color='cyan'))
+
 x_ints = np.arange(25, 44)
 y_ints = np.interp(x_ints, speed_arr[::-1], pred_arr[::-1])
 ax1.scatter(x_ints, y_ints, color='gray', zorder=5, s=30, label='Integer speed 25–43')
@@ -182,7 +210,8 @@ print(f"Best PnL = 0:              speed={best_zero:.4f}")
 print(f"Worst PnL = 0:             speed={worst_zero:.4f}")
 print(f"Best PnL = Worst@speed=0:  speed={x_h_best:.4f}")
 print(f"Predicted PnL = 0:         speed={prediction_zero:.4f}")
-print(f"Max Predicted PnL:         speed={pred_max_x:.4f}")
+print(f"Max Predicted PnL:         speed={pred_max_x:.4f} PnL={pred_max_y:.0f}")
+print(f"Max Empirical PnL:         speed={emp_pred_max_x:.4f} PnL={emp_pred_max_y:.0f}")
 ax1.legend()
 plt.show()
 

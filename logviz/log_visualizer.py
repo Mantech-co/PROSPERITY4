@@ -11,9 +11,13 @@ from PyQt6.QtWidgets import (
     QScrollArea, QCheckBox, QDialog, QRadioButton, QButtonGroup, QGridLayout
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QRectF, Qt, QEvent
-from PyQt6.QtGui import QShortcut, QKeySequence, QFont, QColor, QBrush
+from PyQt6.QtGui import QShortcut, QKeySequence, QFont, QColor, QBrush, QStandardItemModel, QStandardItem
 
 from plotting_utils import build_ob_heatmap, build_order_placement_heatmap, get_rect
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 # --- Styling & Colors ---
 BG, PANEL_BG, BORDER, TEXT, DIM = '#0d0f14', '#12151c', '#1e2330', '#c8d0e0', '#4a5068'
@@ -277,29 +281,242 @@ class BacktestRunner(QThread):
             self.error.emit(str(e))
 
 # --- Data Settings Dialog ---
+BUILTIN_KEYS = ['__POSITION__', '__PNL__']
+BUILTIN_LABELS = {'__POSITION__': '⬡ Position', '__PNL__': '⬡ PnL (Log)'}
+
 class DataSetupDialog(QDialog):
     def __init__(self, keys, settings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Data Setup"); self.setMinimumWidth(400)
+        self.setWindowTitle("Data Setup"); self.setMinimumWidth(480)
         self.settings = settings; layout = QVBoxLayout(self)
         scroll = QScrollArea(); scroll_content = QWidget(); self.grid = QGridLayout(scroll_content)
         self.grid.setColumnStretch(0, 1)
         self.grid.addWidget(QLabel("<b>Data Key</b>"), 0, 0)
         self.grid.addWidget(QLabel("<b>Main Pane</b>"), 0, 1)
         self.grid.addWidget(QLabel("<b>Generic Pane</b>"), 0, 2)
+        self.grid.addWidget(QLabel("<b>Disabled</b>"), 0, 3)
         self.groups = {}
-        for i, key in enumerate(keys):
-            self.grid.addWidget(QLabel(key), i+1, 0)
-            bm, bg = QRadioButton(), QRadioButton()
-            grp = QButtonGroup(self); grp.addButton(bm); grp.addButton(bg)
+        all_keys = BUILTIN_KEYS + list(keys)
+        for i, key in enumerate(all_keys):
+            label = BUILTIN_LABELS.get(key, key)
+            lbl = QLabel(label)
+            if key in BUILTIN_KEYS: lbl.setStyleSheet(f"color: {ACCENT_GOLD}; font-style: italic;")
+            self.grid.addWidget(lbl, i+1, 0)
+            bm, bg, bd = QRadioButton(), QRadioButton(), QRadioButton()
+            grp = QButtonGroup(self); grp.addButton(bm, 0); grp.addButton(bg, 1); grp.addButton(bd, 2)
             self.grid.addWidget(bm, i+1, 1, Qt.AlignmentFlag.AlignCenter)
             self.grid.addWidget(bg, i+1, 2, Qt.AlignmentFlag.AlignCenter)
-            if self.settings.get(key, "generic") == "main": bm.setChecked(True)
-            else: bg.setChecked(True)
+            self.grid.addWidget(bd, i+1, 3, Qt.AlignmentFlag.AlignCenter)
+            val = self.settings.get(key, "disabled" if key in BUILTIN_KEYS else "generic")
+            if val == "main": bm.setChecked(True)
+            elif val == "generic": bg.setChecked(True)
+            else: bd.setChecked(True)
             self.groups[key] = grp
         scroll.setWidget(scroll_content); scroll.setWidgetResizable(True); layout.addWidget(scroll)
         btn = QPushButton("Apply"); btn.clicked.connect(self.accept); layout.addWidget(btn)
-    def get_results(self): return {k: ("main" if g.buttons()[0].isChecked() else "generic") for k, g in self.groups.items()}
+    def get_results(self):
+        out = {}
+        for k, g in self.groups.items():
+            cid = g.checkedId()
+            out[k] = "main" if cid == 0 else ("generic" if cid == 1 else "disabled")
+        return out
+
+class CheckableComboBox(QComboBox):
+    checkedItemsChanged = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.lineEdit().setPlaceholderText("Overall")
+        self._model = QStandardItemModel(self)
+        self.setModel(self._model)
+        self.view().viewport().installEventFilter(self)
+        self.lineEdit().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self.lineEdit() and event.type() == QEvent.Type.MouseButtonPress:
+            self.showPopup()
+            return True
+        if obj is self.view().viewport() and event.type() == QEvent.Type.MouseButtonRelease:
+            index = self.view().indexAt(event.pos())
+            if index.isValid():
+                item = self._model.itemFromIndex(index)
+                if item:
+                    item.setCheckState(
+                        Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked
+                        else Qt.CheckState.Checked
+                    )
+                    self._refresh_text()
+                    self.checkedItemsChanged.emit()
+            return True  # consume all viewport releases — keeps popup open
+        return super().eventFilter(obj, event)
+
+    def _refresh_text(self):
+        checked = self.checkedItems()
+        self.lineEdit().setText(", ".join(checked) if checked else "")
+
+    def checkedItems(self):
+        return [self._model.item(i).text() for i in range(self._model.rowCount())
+                if self._model.item(i) and self._model.item(i).checkState() == Qt.CheckState.Checked]
+
+    def addItem(self, text, checked=False):
+        item = QStandardItem(text)
+        item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self._model.appendRow(item)
+
+    def addItems(self, texts):
+        for t in texts:
+            self.addItem(t)
+
+    def clear(self):
+        self._model.clear()
+        self.lineEdit().setText("")
+
+    def count(self):
+        return self._model.rowCount()
+
+    def findText(self, text, flags=None):
+        for i in range(self._model.rowCount()):
+            item = self._model.item(i)
+            if item and item.text() == text:
+                return i
+        return -1
+
+    def setCheckedItems(self, texts):
+        text_set = set(texts)
+        for i in range(self._model.rowCount()):
+            item = self._model.item(i)
+            if item:
+                item.setCheckState(Qt.CheckState.Checked if item.text() in text_set else Qt.CheckState.Unchecked)
+        self._refresh_text()
+
+
+class TokenDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Auth Required"); self.setMinimumWidth(480)
+        self.token = None
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Token missing/expired. Choose method:"))
+        self.rb_paste = QRadioButton("Paste idToken"); self.rb_paste.setChecked(True)
+        self.rb_refresh = QRadioButton("Paste refreshToken")
+        layout.addWidget(self.rb_paste); layout.addWidget(self.rb_refresh)
+        layout.addWidget(QLabel("Token:"))
+        self.token_input = QLineEdit(); self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.token_input)
+        btn = QPushButton("OK"); btn.clicked.connect(self._on_ok); layout.addWidget(btn)
+
+    def _on_ok(self):
+        val = self.token_input.text().strip()
+        if not val: return
+        try:
+            from imc_api.submit import cognito_refresh, save_token, token_valid
+            if self.rb_refresh.isChecked():
+                tok = cognito_refresh(val)
+            else:
+                tok = val.removeprefix("Bearer ")
+            save_token(tok)
+            self.token = tok
+            self.accept()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", str(e))
+
+
+class SubmitFileDialog(QDialog):
+    def __init__(self, default_path="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Confirm Submission File"); self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Algo file to submit:"))
+        row = QHBoxLayout()
+        self.path_input = QLineEdit(default_path); row.addWidget(self.path_input)
+        btn_browse = QPushButton("Browse..."); btn_browse.clicked.connect(self._browse); row.addWidget(btn_browse)
+        layout.addLayout(row)
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("Submit"); btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("Cancel"); btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(btn_ok); btns.addWidget(btn_cancel); layout.addLayout(btns)
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Algo File", self.path_input.text(), "Python (*.py)")
+        if path: self.path_input.setText(path)
+
+    def get_path(self): return self.path_input.text().strip()
+
+
+class SubmitProgressDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Submission Progress"); self.setMinimumWidth(500); self.setMinimumHeight(260)
+        self._finished = False
+        layout = QVBoxLayout(self)
+        self.lbl_status = QLabel("Starting..."); self.lbl_status.setStyleSheet(f"color: {ACCENT_CYAN}; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+        self.lbl_log = QLabel(); self.lbl_log.setWordWrap(True)
+        self.lbl_log.setStyleSheet(f"color: {DIM}; font-size: 8pt;")
+        layout.addWidget(self.lbl_log)
+        layout.addStretch()
+        self.btn_close = QPushButton("Close"); self.btn_close.setEnabled(False)
+        self.btn_close.clicked.connect(self.accept); layout.addWidget(self.btn_close)
+        self._lines = []
+
+    def closeEvent(self, event):
+        if not self._finished: event.ignore()
+        else: super().closeEvent(event)
+
+    def update_status(self, msg):
+        self.lbl_status.setText(msg)
+        self._lines.append(msg)
+        if len(self._lines) > 10: self._lines = self._lines[-10:]
+        self.lbl_log.setText('\n'.join(self._lines[:-1]))
+
+    def mark_done(self, success):
+        self._finished = True
+        self.btn_close.setEnabled(True)
+        color = ACCENT_GREEN if success else ACCENT_RED
+        self.lbl_status.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+
+class SubmitWorker(QThread):
+    status = pyqtSignal(str)
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, token, file_path, round_id, logviz_dir, logs_dir):
+        super().__init__()
+        self.token = token; self.file_path = file_path
+        self.round_id = round_id; self.logviz_dir = logviz_dir; self.logs_dir = logs_dir
+
+    def run(self):
+        import time, urllib.request
+        try:
+            from imc_api.submit import submit_algo, fetch_zip, unzip_and_move, POLL_INTERVAL, ACTIVE_STATUSES, API_BASE, _headers
+            self.status.emit(f"Submitting {os.path.basename(self.file_path)}...")
+            sub_id, round_id = submit_algo(self.token, self.file_path)
+            self.status.emit(f"Submitted — id={sub_id}  round={round_id}")
+            url = f"{API_BASE}/submissions/algo/{round_id}?page=1&pageSize=50"
+            while True:
+                req = urllib.request.Request(url, headers=_headers(self.token))
+                with urllib.request.urlopen(req) as resp:
+                    data = json.loads(resp.read())
+                sub = next((x for x in data["data"]["items"] if x["id"] == sub_id), None)
+                if sub is None: raise RuntimeError(f"Submission {sub_id} not found in response")
+                status = sub["status"]
+                self.status.emit(f"[{time.strftime('%H:%M:%S')}] {status}")
+                if status not in ACTIVE_STATUSES: break
+                time.sleep(POLL_INTERVAL)
+            if status not in ("DONE", "FINISHED"):
+                self.done.emit(False, f"Ended with status: {status}"); return
+            self.status.emit("Fetching results zip...")
+            zip_path = fetch_zip(self.token, sub_id, self.logs_dir)
+            self.status.emit(f"Downloaded: {os.path.basename(str(zip_path))}")
+            self.status.emit("Extracting logs to logviz/...")
+            unzip_and_move(zip_path, self.logviz_dir)
+            self.done.emit(True, "Done!")
+        except Exception as e:
+            self.done.emit(False, str(e))
+
 
 class LogVisualizer(QMainWindow):
     def __init__(self, log_path=None):
@@ -309,6 +526,7 @@ class LogVisualizer(QMainWindow):
         self.data, self.current_df, self.ob_res = None, None, None
         self.custom_curves = {}
         self.data_settings = {}
+        self.trade_tag_map = {}
         self.markup_lines = []
         self.markup_enabled = False
         self.tooltip_enabled = False
@@ -330,10 +548,13 @@ class LogVisualizer(QMainWindow):
         controls = QHBoxLayout(); controls.setContentsMargins(12, 12, 12, 12); controls.setSpacing(12)
         btn_open = QPushButton("📂 Open Log"); btn_open.clicked.connect(self._open_dialog); controls.addWidget(btn_open)
         self.btn_backtest = QPushButton("⟳ Refresh Backtest"); self.btn_backtest.clicked.connect(self._run_backtest); self.btn_backtest.setVisible(False); controls.addWidget(self.btn_backtest)
+        self.btn_submit = QPushButton("🚀 Submit"); self.btn_submit.clicked.connect(self._on_submit_clicked); self.btn_submit.setVisible(False); controls.addWidget(self.btn_submit)
         btn_import = QPushButton("📊 Import Data"); btn_import.clicked.connect(self._import_data); controls.addWidget(btn_import)
         controls.addWidget(QLabel("Product:")); self.cb_prod = QComboBox(); controls.addWidget(self.cb_prod)
         controls.addWidget(QLabel("Day:")); self.cb_day = QComboBox(); controls.addWidget(self.cb_day)
+        controls.addWidget(QLabel("Tag:")); self.cb_tag = CheckableComboBox(); self.cb_tag.setMinimumWidth(110); controls.addWidget(self.cb_tag)
         self.cb_prod.currentTextChanged.connect(self._process_selection); self.cb_day.currentTextChanged.connect(self._process_selection)
+        self.cb_tag.checkedItemsChanged.connect(self._on_tag_changed)
         controls.addStretch()
         btn_setup = QPushButton("⚙️ Data Setup [S]"); btn_setup.clicked.connect(self._open_data_setup); controls.addWidget(btn_setup)
         self.lbl_markup = QLabel("MARKUP: OFF"); self.lbl_markup.setStyleSheet(f"color: {DIM}; font-weight: bold;"); controls.addWidget(self.lbl_markup)
@@ -399,7 +620,10 @@ class LogVisualizer(QMainWindow):
         pnl_ctrl = QHBoxLayout(); pnl_ctrl.setContentsMargins(12, 8, 12, 8)
         self.cb_pnl_type = QComboBox(); self.cb_pnl_type.addItems(["Log PnL", "Realized PnL", "Valuation PnL"])
         self.cb_pnl_type.currentTextChanged.connect(self._process_selection)
-        pnl_ctrl.addWidget(QLabel("PnL Method:")); pnl_ctrl.addWidget(self.cb_pnl_type); pnl_ctrl.addStretch()
+        pnl_ctrl.addWidget(QLabel("PnL Method:")); pnl_ctrl.addWidget(self.cb_pnl_type)
+        pnl_ctrl.addWidget(QLabel("Product:")); self.cb_pnl_prod = QComboBox()
+        self.cb_pnl_prod.currentTextChanged.connect(self._process_selection)
+        pnl_ctrl.addWidget(self.cb_pnl_prod); pnl_ctrl.addStretch()
         pnl_layout.addLayout(pnl_ctrl)
         self.gw_p = pg.GraphicsLayoutWidget(); self.gw_p.setBackground(BG); pnl_layout.addWidget(self.gw_p)
         self.tabs.addTab(pnl_container, "PnL")
@@ -443,7 +667,11 @@ class LogVisualizer(QMainWindow):
         if dlg.exec():
             self.data_settings = dlg.get_results()
             self._save_data_settings()
-            for c in self.custom_curves.values(): self.p_m.removeItem(c); self.p_gen.removeItem(c)
+            for c in self.custom_curves.values():
+                try: self.p_m.removeItem(c)
+                except: pass
+                try: self.p_gen.removeItem(c)
+                except: pass
             self.custom_curves = {}
             self._process_selection()
 
@@ -497,6 +725,8 @@ class LogVisualizer(QMainWindow):
                 'product': self.cb_prod.currentText(),
                 'day': self.cb_day.currentText(),
                 'dash_product': self.cb_dash_prod.currentText(),
+                'pnl_product': self.cb_pnl_prod.currentText(),
+                'tag': self.cb_tag.checkedItems(),
                 'dd_pct': self.chk_dd_pct.isChecked(),
                 'gen_pane_minimized': self._gen_pane_minimized,
                 'legend': legend_vis,
@@ -549,10 +779,13 @@ class LogVisualizer(QMainWindow):
     def _apply_view_state(self):
         vs = self._read_config().get('view_state', {})
         if not vs: return
-        for combo, key in [(self.cb_prod, 'product'), (self.cb_day, 'day'), (self.cb_dash_prod, 'dash_product')]:
+        for combo, key in [(self.cb_prod, 'product'), (self.cb_day, 'day'), (self.cb_dash_prod, 'dash_product'), (self.cb_pnl_prod, 'pnl_product')]:
             val = vs.get(key, '')
             if val and combo.findText(val) >= 0:
                 combo.blockSignals(True); combo.setCurrentText(val); combo.blockSignals(False)
+        saved_tags = vs.get('tag', [])
+        if isinstance(saved_tags, list) and saved_tags:
+            self.cb_tag.blockSignals(True); self.cb_tag.setCheckedItems(saved_tags); self.cb_tag.blockSignals(False)
         self.chk_dd_pct.blockSignals(True); self.chk_dd_pct.setChecked(vs.get('dd_pct', False)); self.chk_dd_pct.blockSignals(False)
         minimized = vs.get('gen_pane_minimized', False)
         if minimized != self._gen_pane_minimized:
@@ -590,12 +823,73 @@ class LogVisualizer(QMainWindow):
         else:
             self.p_gen.setFixedHeight(200)
             if self.data:
-                has_generic = any(self.data_settings.get(k, "generic") == "generic" for k in self.data.get('custom', {}))
+                has_generic = (
+                    any(self.data_settings.get(k, 'disabled') == 'generic' for k in BUILTIN_KEYS) or
+                    any(self.data_settings.get(k, 'generic') == 'generic' for k in self.data.get('custom', {}))
+                )
                 self.p_gen.setVisible(has_generic)
 
     def _is_backtest_log(self, path):
         if not path: return False
         return 'backtests' in os.path.normpath(path).split(os.sep)
+
+    def _is_submission_log(self, path):
+        if not path: return False
+        logviz_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.dirname(os.path.abspath(path)) == logviz_dir
+
+    def _get_submit_token(self):
+        from imc_api.submit import load_token, token_valid
+        token = load_token()
+        if token_valid(token): return token
+        dlg = TokenDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted: return dlg.token
+        return None
+
+    def _on_submit_clicked(self):
+        token = self._get_submit_token()
+        if not token: return
+        self.btn_submit.setEnabled(False); self.btn_submit.setText("Checking...")
+        from PyQt6.QtWidgets import QApplication as _QApp
+        _QApp.processEvents()
+        try:
+            from imc_api.submit import find_active_submission
+            round_id = self._read_config().get('submit_round', 3)
+            active = find_active_submission(token, round_id)
+        except Exception as e:
+            self.btn_submit.setEnabled(True); self.btn_submit.setText("🚀 Submit")
+            QMessageBox.warning(self, "Error", f"Failed to check server:\n{e}"); return
+        self.btn_submit.setEnabled(True); self.btn_submit.setText("🚀 Submit")
+        if active:
+            submitter = active.get('submitter') or active.get('teamName') or active.get('filename') or active.get('id', '?')
+            QMessageBox.information(self, "Server Busy",
+                f"Server busy — processing submission uploaded by: {submitter}\nStatus: {active.get('status', '?')}"); return
+        cfg = self._read_config()
+        default_file = cfg.get('last_submit_file', _PROJECT_ROOT)
+        dlg = SubmitFileDialog(default_file, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        file_path = dlg.get_path()
+        if not os.path.isfile(file_path):
+            QMessageBox.warning(self, "Invalid File", f"File not found:\n{file_path}"); return
+        cfg['last_submit_file'] = file_path; self._write_config(cfg)
+        logviz_dir = os.path.dirname(os.path.abspath(__file__))
+        logs_dir = os.path.join(_PROJECT_ROOT, 'logs')
+        self._submit_progress = SubmitProgressDialog(self)
+        self._submit_worker = SubmitWorker(token, file_path, round_id, logviz_dir, logs_dir)
+        self._submit_worker.status.connect(self._submit_progress.update_status)
+        self._submit_worker.done.connect(self._on_submit_done)
+        self._submit_worker.start()
+        self._submit_progress.exec()
+
+    def _on_submit_done(self, success, message):
+        self._submit_progress.update_status(message)
+        self._submit_progress.mark_done(success)
+        if success: self._load_newest_submission_log()
+
+    def _load_newest_submission_log(self):
+        logviz_dir = os.path.dirname(os.path.abspath(__file__))
+        logs = [os.path.join(logviz_dir, f) for f in os.listdir(logviz_dir) if f.endswith('.log')]
+        if logs: self._load_file(max(logs, key=os.path.getmtime))
 
     def _run_backtest(self):
         self.btn_backtest.setEnabled(False)
@@ -807,9 +1101,11 @@ class LogVisualizer(QMainWindow):
         # Order placements at this ts
         prod = self.cb_prod.currentText()
         day_sel = self.cb_day.currentText()
+        _tag_sel = self.cb_tag.checkedItems() if hasattr(self, 'cb_tag') and self.cb_tag.count() > 0 else []
         orders_here = [o for o in self.data.get('orders', []) if o['ts'] == raw_ts
                        and (o.get('product', '') in ('', prod))
-                       and (row_day is None or o.get('day', row_day) == row_day)]
+                       and (row_day is None or o.get('day', row_day) == row_day)
+                       and (not _tag_sel or ((o.get('tag') or '').strip() or 'Untagged') in _tag_sel)]
         if orders_here:
             sec('ORDERS PLACED')
             for o in orders_here:
@@ -893,9 +1189,12 @@ class LogVisualizer(QMainWindow):
         if not p_dfs: return
         df = pl.concat(p_dfs, how='diagonal_relaxed').sort(['day', 'timestamp'])
         self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': [], 'orders': [], '_continuous_ts': _is_timestamps_continuous(df), '_min_day': df['day'].min() if 'day' in df.columns else 0}
+        self.trade_tag_map = {}
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list()
         self.cb_prod.clear(); self.cb_prod.addItems(products); self.cb_day.clear(); self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()])
         self.cb_prod.blockSignals(False); self.cb_dash_prod.clear(); self.cb_dash_prod.addItems(['Overall'] + products)
+        self.cb_pnl_prod.blockSignals(True); self.cb_pnl_prod.clear(); self.cb_pnl_prod.addItems(['Overall'] + products); self.cb_pnl_prod.blockSignals(False)
+        self.cb_tag.blockSignals(True); self.cb_tag.clear(); self.cb_tag.addItems(['Untagged']); self.cb_tag.blockSignals(False)
         self._apply_saved_settings()
         self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._process_selection()
         self._apply_custom_curve_visibility(); self._update_dashboard()
@@ -931,9 +1230,13 @@ class LogVisualizer(QMainWindow):
         self.sandbox_msgs = sandbox_msgs
         min_day = df['day'].min() if 'day' in df.columns else 0
         self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom, 'debug': debug_msgs, 'orders': orders, '_continuous_ts': _is_timestamps_continuous(df), '_min_day': min_day}
+        self.trade_tag_map = self._build_trade_tag_map(orders)
+        unique_tags = sorted({(o.get('tag') or '').strip() for o in orders if (o.get('tag') or '').strip()})
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list(); self.cb_prod.clear(); self.cb_prod.addItems(products)
         self.cb_day.clear(); self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()]); self.cb_prod.blockSignals(False)
         self.cb_dash_prod.clear(); self.cb_dash_prod.addItems(['Overall'] + products)
+        self.cb_pnl_prod.blockSignals(True); self.cb_pnl_prod.clear(); self.cb_pnl_prod.addItems(['Overall'] + products); self.cb_pnl_prod.blockSignals(False)
+        self.cb_tag.blockSignals(True); self.cb_tag.clear(); self.cb_tag.addItems(unique_tags + ['Untagged']); self.cb_tag.blockSignals(False)
         for c in self.custom_curves.values():
             try: self.p_m.removeItem(c)
             except: pass
@@ -943,6 +1246,7 @@ class LogVisualizer(QMainWindow):
         self.data_settings = {}
         self._apply_saved_settings()
         self.btn_backtest.setVisible(self._is_backtest_log(path))
+        self.btn_submit.setVisible(self._is_submission_log(path))
         self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._update_sandbox_table(); self._process_selection()
         self._apply_custom_curve_visibility(); self._update_dashboard()
 
@@ -979,8 +1283,10 @@ class LogVisualizer(QMainWindow):
         for c in self.pos_curves.values(): self.p_pos.removeItem(c)
         self.pos_curves.clear(); trades = self.data.get('trades', [])
         if not trades: return
+        tags = self.cb_tag.checkedItems() if hasattr(self, 'cb_tag') else []
         pos_by_sym = {}; cont_ts = self.data.get('_continuous_ts', False); min_day = self.data.get('_min_day', 0)
         for tr in trades:
+            if not self._trade_matches_tag(tr, tags): continue
             is_b = str(tr.get('buyer','')).upper()=='SUBMISSION'; is_s = str(tr.get('seller','')).upper()=='SUBMISSION'
             if not is_b and not is_s: continue
             sym, qty, ts = tr.get('symbol',''), tr.get('quantity',0), tr.get('timestamp',0)
@@ -992,6 +1298,182 @@ class LogVisualizer(QMainWindow):
                 if day != last_day: cum = 0; last_day = day
                 cum += delta; ts_list.append(pts); pos_list.append(cum)
             self.pos_curves[sym] = self.p_pos.plot(ts_list, pos_list, pen=pg.mkPen(CUSTOM_COLORS[i % len(CUSTOM_COLORS)], width=2), name=sym, stepMode='right')
+
+    def _compute_position_series(self, t, prod, day, cont_ts, min_day, tags=None):
+        """Return list of cumulative position values aligned to t array."""
+        trade_events = []
+        for tr in self.data.get('trades', []):
+            if tr.get('symbol') != prod: continue
+            if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
+            if not self._trade_matches_tag(tr, tags): continue
+            is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+            is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+            if not is_b and not is_s: continue
+            tr_ts = tr.get('timestamp', 0)
+            if day == 'All' and 'day' in tr and not cont_ts: tr_ts += (tr['day'] - min_day) * 1000000
+            qty = int(tr.get('quantity', 0))
+            trade_events.append((tr_ts, qty if is_b else -qty))
+        trade_events.sort(key=lambda x: x[0])
+        # build ts→cum_pos map (last value wins per ts)
+        cum, pos_at_t = 0, {}
+        for tr_ts, delta in trade_events:
+            cum += delta
+            pos_at_t[tr_ts] = cum
+        t_list = t.tolist()
+        result = []
+        last_pos = 0
+        for ts_val in t_list:
+            if ts_val in pos_at_t: last_pos = pos_at_t[ts_val]
+            result.append(last_pos)
+        return result
+
+    def _build_trade_tag_map(self, orders):
+        """(ts, product, side, price_int) → tag for SUBMISSION trades."""
+        m = {}
+        for o in orders:
+            tag = (o.get('tag') or '').strip() or 'Untagged'
+            m[(o['ts'], o['product'], o['side'], int(o['price']))] = tag
+        return m
+
+    def _get_trade_tag(self, tr):
+        """Return tag for a SUBMISSION trade, or None if bot trade."""
+        is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+        is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+        if not is_b and not is_s:
+            return None
+        side = 'BUY' if is_b else 'SELL'
+        key = (tr.get('timestamp', 0), tr.get('symbol', ''), side, int(tr.get('price', 0)))
+        return self.trade_tag_map.get(key, 'Untagged')
+
+    def _trade_matches_tag(self, tr, tags):
+        """True if trade should be included for the given tag filter (empty list = all)."""
+        if not tags:
+            return True
+        tr_tag = self._get_trade_tag(tr)
+        if tr_tag is None:
+            return False  # bot trade — excluded when a specific tag is selected
+        return tr_tag in tags
+
+    def _compute_valuation_pnl_aligned(self, t, prod, day, mid, cont_ts, min_day, tags):
+        """Valuation PnL (cash + pos*mid) aligned to t, filtered by tag."""
+        trade_events = []
+        for tr in self.data.get('trades', []):
+            if tr.get('symbol') != prod: continue
+            if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
+            if not self._trade_matches_tag(tr, tags): continue
+            is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+            is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+            if not is_b and not is_s: continue
+            tr_ts = tr.get('timestamp', 0)
+            if day == 'All' and 'day' in tr and not cont_ts: tr_ts += (tr['day'] - min_day) * 1000000
+            qs = int(tr.get('quantity', 0)) * (1 if is_b else -1)
+            trade_events.append((tr_ts, qs, float(tr.get('price', 0))))
+        trade_events.sort()
+        cash_at, pos_at, cc, cp = {}, {}, 0.0, 0
+        for tr_ts, qs, pr in trade_events:
+            cc -= qs * pr; cp += qs
+            cash_at[tr_ts] = cc; pos_at[tr_ts] = cp
+        result, lc, lp = [], 0.0, 0
+        for i, ts_val in enumerate(t.tolist()):
+            if ts_val in cash_at: lc = cash_at[ts_val]; lp = pos_at[ts_val]
+            result.append(lc + lp * (float(mid[i]) if i < len(mid) else 0.0))
+        return result
+
+    def _on_tag_changed(self):
+        if not self.data:
+            return
+        self._build_position_plot()
+        self._process_selection()
+
+    def _compute_pnl(self, pnl_prod, day, pnl_type, cont_ts, min_day, tags=None):
+        df = self.data['prices_df']
+        if pnl_prod == 'Overall':
+            sub = df
+            if day != 'All':
+                try: sub = sub.filter(pl.col('day') == int(day))
+                except: pass
+            if day == 'All' and 'day' in sub.columns and not cont_ts:
+                sub = sub.with_columns((pl.col('timestamp') + (pl.col('day') - min_day) * 1000000).alias('_cts'))
+                t_col = '_cts'
+            else:
+                t_col = 'timestamp'
+            if pnl_type == 'Log PnL' and not tags:
+                if 'profit_and_loss' not in sub.columns:
+                    ts_arr = sub.select(t_col).unique().sort(t_col)[t_col].to_numpy()
+                    return ts_arr, np.zeros(len(ts_arr))
+                agg = sub.group_by(t_col).agg(pl.col('profit_and_loss').sum().alias('pnl')).sort(t_col)
+                return agg[t_col].to_numpy(), agg['pnl'].to_numpy()
+            if pnl_type == 'Log PnL':
+                pnl_type = 'Valuation PnL'  # log PnL can't be split by tag; fall back to trade-based
+                ts_arr = sub.select(t_col).unique().sort(t_col)[t_col].to_numpy()
+                t_list = ts_arr.tolist()
+                combined = np.zeros(len(t_list))
+                for ap in sub['product'].unique().to_list():
+                    ap_mid = {}
+                    if pnl_type == 'Valuation PnL':
+                        ap_sub = sub.filter(pl.col('product') == ap)
+                        ap_mid = dict(zip(ap_sub[t_col].to_list(), ap_sub['mid_price'].to_list()))
+                    trade_events = []
+                    for tr in self.data['trades']:
+                        if tr.get('symbol') != ap: continue
+                        if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
+                        if not self._trade_matches_tag(tr, tags): continue
+                        tr_ts = tr.get('timestamp', 0)
+                        if day == 'All' and 'day' in tr and not cont_ts: tr_ts += (tr['day'] - min_day) * 1000000
+                        is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+                        is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+                        if not is_b and not is_s: continue
+                        qs = int(tr.get('quantity', 0)) * (1 if is_b else -1)
+                        trade_events.append((tr_ts, qs, float(tr.get('price', 0))))
+                    trade_events.sort()
+                    cash_at, pos_at, cc, cp = {}, {}, 0.0, 0
+                    for tr_ts, qs, pr in trade_events:
+                        cc -= qs * pr; cp += qs
+                        cash_at[tr_ts] = cc; pos_at[tr_ts] = cp
+                    lc, lp = 0.0, 0
+                    for i, ts_val in enumerate(t_list):
+                        if ts_val in cash_at: lc = cash_at[ts_val]; lp = pos_at[ts_val]
+                        if pnl_type == 'Realized PnL':
+                            combined[i] += lc
+                        else:
+                            combined[i] += lc + lp * (ap_mid.get(ts_val, 0.0) or 0.0)
+                return ts_arr, combined
+        else:
+            sub = df.filter(pl.col('product') == pnl_prod)
+            if day != 'All':
+                try: sub = sub.filter(pl.col('day') == int(day))
+                except: pass
+            pnl_t = sub['timestamp'].to_numpy()
+            if day == 'All' and 'day' in sub.columns and not cont_ts:
+                pnl_t = pnl_t + (sub['day'].to_numpy() - min_day) * 1000000
+            mid = sub['mid_price'].to_numpy()
+            if pnl_type == 'Log PnL' and not tags:
+                return pnl_t, (sub['profit_and_loss'].to_numpy() if 'profit_and_loss' in sub.columns else np.zeros(len(pnl_t)))
+            if pnl_type == 'Log PnL':
+                pnl_type = 'Valuation PnL'  # log PnL can't be split by tag; fall back to trade-based
+            trade_events = []
+            for tr in self.data['trades']:
+                if tr.get('symbol') != pnl_prod: continue
+                if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
+                if not self._trade_matches_tag(tr, tags): continue
+                tr_ts = tr.get('timestamp', 0)
+                if day == 'All' and 'day' in tr and not cont_ts: tr_ts += (tr['day'] - min_day) * 1000000
+                is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+                is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+                if not is_b and not is_s: continue
+                qs = int(tr.get('quantity', 0)) * (1 if is_b else -1)
+                trade_events.append((tr_ts, qs, float(tr.get('price', 0))))
+            trade_events.sort()
+            cash_at, pos_at, cc, cp = {}, {}, 0.0, 0
+            for tr_ts, qs, pr in trade_events:
+                cc -= qs * pr; cp += qs
+                cash_at[tr_ts] = cc; pos_at[tr_ts] = cp
+            realized = np.zeros(len(pnl_t))
+            lc, lp = 0.0, 0
+            for i, ts_val in enumerate(pnl_t.tolist()):
+                if ts_val in cash_at: lc = cash_at[ts_val]; lp = pos_at[ts_val]
+                realized[i] = lc if pnl_type == 'Realized PnL' else lc + lp * (mid[i] if i < len(mid) else 0.0)
+            return pnl_t, realized
 
     def _process_selection(self):
         if not self.data or not self.cb_prod.currentText(): return
@@ -1005,8 +1487,11 @@ class LogVisualizer(QMainWindow):
         if day == 'All' and 'day' in self.current_df.columns and not cont_ts: t = t + (self.current_df['day'].to_numpy() - min_day) * 1000000
         self._plot_t = t
         mid = self.current_df['mid_price'].to_numpy(); self.curve_mid.setData(t, mid)
-        pnl_data = self.current_df['profit_and_loss'].to_numpy() if 'profit_and_loss' in self.current_df.columns else np.zeros(len(t))
-        self.curve_pnl.setData(t, pnl_data)
+        tags = self.cb_tag.checkedItems() if hasattr(self, 'cb_tag') and self.cb_tag.count() > 0 else []
+        pnl_prod = self.cb_pnl_prod.currentText() if self.cb_pnl_prod.count() > 0 else prod
+        pnl_type = self.cb_pnl_type.currentText()
+        pnl_t, pnl_data = self._compute_pnl(pnl_prod, day, pnl_type, cont_ts, min_day, tags)
+        self.curve_pnl.setData(pnl_t, pnl_data)
 
         mb_t, mb_p, ms_t, ms_p, bot_raw = [], [], [], [], []
         for tr in self.data['trades']:
@@ -1015,8 +1500,10 @@ class LogVisualizer(QMainWindow):
             ts = tr.get('timestamp', 0)
             if day == 'All' and 'day' in tr and not cont_ts: ts += (tr['day'] - min_day) * 1000000
             is_b = str(tr.get('buyer','')).upper()=='SUBMISSION'; is_s = str(tr.get('seller','')).upper()=='SUBMISSION'
-            if is_b: mb_t.append(ts); mb_p.append(tr['price'])
-            elif is_s: ms_t.append(ts); ms_p.append(tr['price'])
+            if is_b:
+                if self._trade_matches_tag(tr, tags): mb_t.append(ts); mb_p.append(tr['price'])
+            elif is_s:
+                if self._trade_matches_tag(tr, tags): ms_t.append(ts); ms_p.append(tr['price'])
             else: bot_raw.append((ts, tr['price'], int(tr.get('quantity', 1))))
         
         vols = np.array([v for _, _, v in bot_raw]) if bot_raw else np.array([1])
@@ -1034,7 +1521,8 @@ class LogVisualizer(QMainWindow):
             self.img_item.setImage(self.ob_res['img'], autoLevels=False)
             self.img_item.setRect(get_rect(t, self.ob_res['levels']))
             self.img_item.setVisible(True)
-            o_res = build_order_placement_heatmap(self.data.get('orders',[]), prod, day, t, cont_ts, min_day, ORDER_BUY_COLORS, ORDER_SELL_COLORS)
+            filtered_orders = [o for o in self.data.get('orders', []) if not tags or ((o.get('tag') or '').strip() or 'Untagged') in tags]
+            o_res = build_order_placement_heatmap(filtered_orders, prod, day, t, cont_ts, min_day, ORDER_BUY_COLORS, ORDER_SELL_COLORS)
             if o_res:
                 self.img_orders.setImage(o_res['img'], autoLevels=False)
                 self.img_orders.setRect(get_rect(t, o_res['levels']))
@@ -1042,29 +1530,68 @@ class LogVisualizer(QMainWindow):
             self.hm_legend.update_ranges(self.ob_res['max_vol'], q_edges)
         else: self.img_item.setVisible(False); self.img_orders.clear()
 
+        # ── Built-in overlay curves (Position, PnL) ──────────────────────────
+        if tags:
+            _builtin_pnl = self._compute_valuation_pnl_aligned(t, prod, day, mid, cont_ts, min_day, tags)
+        else:
+            _builtin_pnl = (self.current_df['profit_and_loss'].to_numpy().tolist()
+                            if 'profit_and_loss' in self.current_df.columns else [0.0] * len(t))
+        builtin_data = {
+            '__POSITION__': (t.tolist(), self._compute_position_series(t, prod, day, cont_ts, min_day, tags)),
+            '__PNL__': (t.tolist(), _builtin_pnl),
+        }
+        builtin_colors = {'__POSITION__': ACCENT_PURPLE, '__PNL__': ACCENT_GREEN}
+        builtin_labels = {'__POSITION__': 'Position', '__PNL__': 'PnL (Log)'}
+
         # Update Custom Data Curves
         custom_data = self.data.get('custom', {})
         t_min, t_max = (t[0], t[-1]) if len(t) > 0 else (0, 1)
-        
+
         has_generic_data = False
+
+        # --- built-ins ---
+        for bkey, (bts, bvals) in builtin_data.items():
+            pane = self.data_settings.get(bkey, 'disabled')
+            if pane == 'disabled':
+                if bkey in self.custom_curves:
+                    try: self.p_m.removeItem(self.custom_curves[bkey])
+                    except: pass
+                    try: self.p_gen.removeItem(self.custom_curves[bkey])
+                    except: pass
+                    del self.custom_curves[bkey]
+                continue
+            if pane == 'generic': has_generic_data = True
+            target_plot = self.p_m if pane == 'main' else self.p_gen
+            color = builtin_colors[bkey]
+            label = builtin_labels[bkey]
+            if bkey not in self.custom_curves:
+                curve = target_plot.plot(pen=pg.mkPen(color, width=1.5, style=Qt.PenStyle.DashLine), name=label)
+                self.custom_curves[bkey] = curve
+                if pane == 'main': self.leg_m.addItem(curve, f"[B] {label}")
+            curve = self.custom_curves[bkey]
+            curve.setData(bts, bvals)
+
+        # --- custom keys ---
         for name, pts in custom_data.items():
-            pane = self.data_settings.get(name, "generic")
-            target_plot = self.p_m if pane == "main" else self.p_gen
-            if pane == "generic": has_generic_data = True
-            
+            pane = self.data_settings.get(name, 'generic')
+            if pane == 'disabled':
+                if name in self.custom_curves:
+                    try: self.p_m.removeItem(self.custom_curves[name])
+                    except: pass
+                    try: self.p_gen.removeItem(self.custom_curves[name])
+                    except: pass
+                    del self.custom_curves[name]
+                continue
+            target_plot = self.p_m if pane == 'main' else self.p_gen
+            if pane == 'generic': has_generic_data = True
             if name not in self.custom_curves:
-                color = CUSTOM_COLORS[len(self.custom_curves) % len(CUSTOM_COLORS)]
+                color = CUSTOM_COLORS[len([k for k in self.custom_curves if k not in BUILTIN_KEYS]) % len(CUSTOM_COLORS)]
                 curve = target_plot.plot(pen=pg.mkPen(color, width=1.5), name=name)
                 self.custom_curves[name] = curve
-                if pane == "main":
-                    self.leg_m.addItem(curve, f"[C] {name}")
-            
+                if pane == 'main': self.leg_m.addItem(curve, f"[C] {name}")
             curve = self.custom_curves[name]
             pts_f = [p for p in pts if t_min <= p[0] <= t_max]
-            if pts_f:
-                curve.setData([p[0] for p in pts_f], [p[1] for p in pts_f])
-            else:
-                curve.setData([], [])
+            curve.setData([p[0] for p in pts_f], [p[1] for p in pts_f]) if pts_f else curve.setData([], [])
 
         self.p_gen.setVisible(has_generic_data and not self._gen_pane_minimized)
         self.p_m.autoRange(); self.p_pnl.autoRange()

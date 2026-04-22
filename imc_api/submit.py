@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -231,7 +232,7 @@ def unzip_and_move(zip_path, logviz_dir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("file", help=".py algo file to submit")
-    parser.add_argument("--round", type=int, default=2, help="Round ID for pre-submit check (default: 2)")
+    parser.add_argument("--round", type=int, default=3, help="Round ID for pre-submit check (default: 3)")
     parser.add_argument("--logs-dir", default="logs")
     parser.add_argument("--logviz-dir", default="logviz")
     parser.add_argument("--token", help="Bearer token (skips login prompt)")
@@ -267,6 +268,15 @@ def main():
     zip_path = fetch_zip(token, sub_id, args.logs_dir)
     unzip_and_move(zip_path, args.logviz_dir)
     print("Done.")
+
+    logviz_dir = Path(args.logviz_dir)
+    logs = sorted(logviz_dir.glob("*.log"), key=lambda p: p.stat().st_mtime)
+    if logs:
+        newest = logs[-1]
+        print(f"Opening: {newest}")
+        visualizer = Path(__file__).parent.parent / "logviz" / "log_visualizer.py"
+        if visualizer.exists():
+            subprocess.Popen([sys.executable, str(visualizer), str(newest)])
 
 
 if __name__ == "__main__":

@@ -277,6 +277,34 @@ ax5.spines[['top', 'right']].set_visible(False)
 ax5.legend(fontsize=11)
 plt.tight_layout()
 plt.show()
+
+# ── Fig CDF: cumulative player distribution by speed ─────────────────────────
+data_cdf = sorted(data, key=lambda x: x['speed'])
+spd_cdf = np.array([d['speed'] for d in data_cdf])
+cum_players = np.cumsum([d['players'] for d in data_cdf])
+cdf_vals = cum_players / cum_players[-1]
+
+fig_cdf, ax_cdf = plt.subplots(figsize=(12, 6))
+ax_cdf.step(spd_cdf, cdf_vals, where='post', color='steelblue', linewidth=2)
+ax_cdf.fill_between(spd_cdf, cdf_vals, step='post', alpha=0.15, color='steelblue')
+ax_cdf.set_xlabel('Speed', fontsize=13)
+ax_cdf.set_ylabel('Cumulative Fraction of Players', fontsize=13)
+ax_cdf.set_title('CDF of Player Speed Distribution — Round 2', fontsize=15, fontweight='bold')
+ax_cdf.set_xlim(-1, max(spd_cdf) + 1)
+ax_cdf.set_ylim(0, 1)
+ax_cdf.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.0%}'))
+ax_cdf.grid(alpha=0.3)
+ax_cdf.spines[['top', 'right']].set_visible(False)
+for pct in [0.25, 0.5, 0.75]:
+    idx = np.searchsorted(cdf_vals, pct)
+    spd_at = spd_cdf[min(idx, len(spd_cdf)-1)]
+    ax_cdf.axhline(pct, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+    ax_cdf.axvline(spd_at, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+    ax_cdf.annotate(f'p{int(pct*100)}={spd_at:.0f}', xy=(spd_at, pct),
+                    xytext=(4, 4), textcoords='offset points', fontsize=9, color='dimgray')
+plt.tight_layout()
+plt.show()
+
 fig4, axes = plt.subplots(1, 2, figsize=(16, 6))
 
 axes[0].hist(devs, bins=100, color='steelblue', alpha=0.85, edgecolor='none')
