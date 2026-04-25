@@ -51,8 +51,9 @@ def main():
     )
 
     underlying = (
-        df[df["product"] == "VELVETFRUIT_EXTRACT"][["day", "timestamp", "mid_price"]]
-        .rename(columns={"mid_price": "S"})
+        df[df["product"] == "VELVETFRUIT_EXTRACT"][
+            ["day", "timestamp", "bid_price_1", "ask_price_1"]
+        ].rename(columns={"bid_price_1": "S_bid", "ask_price_1": "S_ask"})
     )
 
     records = []
@@ -66,9 +67,15 @@ def main():
         for _, row in merged.iterrows():
             T = tte_years(int(row["day"]), int(row["timestamp"]))
             global_ts = row["day"] * TS_SPAN + row["timestamp"]
-            for side, price_col in [("bid", "bid_price_1"), ("ask", "ask_price_1")]:
-                price = row[price_col]
-                iv = implied_vol(price, row["S"], K, T)
+            # for bid IV: hedge by buying underlying at ask → use S_ask
+            # for ask IV: hedge by selling underlying at bid → use S_bid
+            for side, opt_col, S_col in [
+                ("bid", "bid_price_1", "S_ask"),
+                ("ask", "ask_price_1", "S_bid"),
+            ]:
+                price = row[opt_col]
+                S = row[S_col]
+                iv = implied_vol(price, S, K, T)
                 if not np.isnan(iv):
                     records.append({"strike": K, "side": side, "iv": iv,
                                     "global_ts": global_ts})
@@ -123,6 +130,35 @@ def main():
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.show()
     print(f"saved {out}")
+
+    # --- MSE histogram for VEV_5200 bid and ask separately ---
+    K = 5200
+    sub5200 = ivdf[ivdf["strike"] == K].sort_values("global_ts")
+
+    fig2, axes2 = plt.subplots(1, 2, figsize=(12, 5))
+    fig2.suptitle("VEV_5200 — Squared Error from rolling median IV (window=20)", fontsize=12)
+
+    for ax, side, color in [(axes2[0], "bid", "#39ff6e"), (axes2[1], "ask", "#ff3d5a")]:
+        ss = sub5200[sub5200["side"] == side]
+        y  = ss["iv"].values
+        if len(y) >= 20:
+            roll_med = pd.Series(y).rolling(20, center=True, min_periods=1).median().values
+            se = (y - roll_med) ** 2
+        else:
+            se = np.array([])
+        p80 = np.percentile(se, 80)
+        tail = se[se >= p80]
+        ax.hist(tail, bins=50, color=color, edgecolor="none", alpha=0.8)
+        ax.set_title(f"{side} IV squared error (top 20%, p80={p80:.6f})")
+        ax.set_xlabel("(IV − median IV)²")
+        ax.set_ylabel("Count")
+        ax.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    out2 = Path(__file__).parent / "options_iv_mse_hist.png"
+    plt.savefig(out2, dpi=150, bbox_inches="tight")
+    plt.show()
+    print(f"saved {out2}")
 
 
 if __name__ == "__main__":

@@ -4,5 +4,9 @@
     "mm_limit": 40,
     "vol_threshold": 20,
     "price_threshold": 3.0,
-    "position_limit": 200
+    "position_limit": 200,
+    "iv_window": 100,
+    "iv_diff_threshold": 0.002,
+    "delta_threshold": 5.0,
+    "option_limit": 300
 }
