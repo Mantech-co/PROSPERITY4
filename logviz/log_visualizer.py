@@ -526,6 +526,8 @@ class LogVisualizer(QMainWindow):
         self.setGeometry(50, 50, 1600, 920)
         self.data, self.current_df, self.ob_res = None, None, None
         self.custom_curves = {}
+        self._bid_p_cols = []; self._ask_p_cols = []
+        self._custom_ts_arrays = {}
         self.data_settings = {}
         self.trade_tag_map = {}
         self.markup_lines = []
@@ -1044,16 +1046,20 @@ class LogVisualizer(QMainWindow):
         x, y = mouse_point.x(), mouse_point.y()
 
         plot_t = self._plot_t if self._plot_t is not None else self.current_df['timestamp'].to_numpy()
-        idx = int(np.clip(np.searchsorted(plot_t, x), 0, len(plot_t) - 1))
+        # Find nearest index
+        idx = np.searchsorted(plot_t, x)
+        if idx > 0 and (idx == len(plot_t) or abs(x - plot_t[idx-1]) < abs(x - plot_t[idx])):
+            idx -= 1
+        idx = int(np.clip(idx, 0, len(plot_t) - 1))
+        
         ts_plot = plot_t[idx]
-
         row = self.current_df.row(idx, named=True)
         raw_ts = int(row['timestamp'])
         row_day = row.get('day', None)
         mid = row.get('mid_price', 0) or 0
         pnl = row.get('profit_and_loss', 0) or 0
 
-        self.v_line.setPos(ts_plot); self.h_line.setPos(y)
+        self.v_line.setPos(x); self.h_line.setPos(y)
 
         if not self.tooltip_enabled: return
         if self.tooltip_frozen: return
@@ -1076,8 +1082,7 @@ class LogVisualizer(QMainWindow):
         lines.append('')
 
         # Orderbook from prices_df row
-        bid_p_cols = sorted([c for c in self.current_df.columns if 'bid_price_' in c], key=lambda c: int(c.split('_')[-1]))
-        ask_p_cols = sorted([c for c in self.current_df.columns if 'ask_price_' in c], key=lambda c: int(c.split('_')[-1]))
+        bid_p_cols = self._bid_p_cols; ask_p_cols = self._ask_p_cols
         if bid_p_cols or ask_p_cols:
             sec('ORDERBOOK')
             for pc in reversed(ask_p_cols):
@@ -1145,7 +1150,8 @@ class LogVisualizer(QMainWindow):
             sec('CUSTOM DATA')
             for i, (name, pts) in enumerate(custom.items()):
                 if not pts: continue
-                ts_arr = np.array([p[0] for p in pts])
+                ts_arr = self._custom_ts_arrays.get(name)
+                if ts_arr is None: continue
                 ci = int(np.clip(np.searchsorted(ts_arr, x), 0, len(ts_arr) - 1))
                 val = pts[ci][1]
                 color = CUSTOM_COLORS[i % len(CUSTOM_COLORS)]
@@ -1156,7 +1162,6 @@ class LogVisualizer(QMainWindow):
             f'font-size:8pt;line-height:1.5;">' + '<br>'.join(lines) + '</div>'
         )
         self._info_label.setText(html)
-        self._reposition_info_panel()
         self.info_panel.setVisible(True)
 
     def _set_zoom(self, mode):
@@ -1199,8 +1204,15 @@ class LogVisualizer(QMainWindow):
                 if day_match: df = df.with_columns(pl.lit(int(day_match.group(1))).alias("day"))
                 t_dicts.extend(df.to_dicts())
         if not p_dfs: return
-        df = pl.concat(p_dfs, how='diagonal_relaxed').sort(['day', 'timestamp']).unique(subset=['day', 'timestamp', 'product'], keep='last')
+        df = pl.concat(p_dfs, how='diagonal_relaxed')
+        if 'day' in df.columns:
+            df = df.with_columns(pl.col('day').cast(pl.Int32, strict=False))
+        if 'timestamp' in df.columns:
+            df = df.with_columns(pl.col('timestamp').cast(pl.Int32, strict=False))
+        df = df.drop_nulls(subset=['day', 'timestamp']).unique(subset=['day', 'timestamp', 'product'], keep='last').sort(['day', 'timestamp'])
+        
         self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': [], 'orders': [], '_continuous_ts': _is_timestamps_continuous(df), '_min_day': df['day'].min() if 'day' in df.columns else 0}
+        self._custom_ts_arrays = {}
         self.trade_tag_map = {}
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list()
         self.cb_prod.clear(); self.cb_prod.addItems(products); self.cb_day.clear(); self.cb_day.addItems(['All'] + [str(d) for d in df['day'].unique().sort().to_list()])
@@ -1242,6 +1254,7 @@ class LogVisualizer(QMainWindow):
         self.sandbox_msgs = sandbox_msgs
         min_day = df['day'].min() if 'day' in df.columns else 0
         self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom, 'debug': debug_msgs, 'orders': orders, '_continuous_ts': _is_timestamps_continuous(df), '_min_day': min_day}
+        self._custom_ts_arrays = {name: np.array([p[0] for p in pts]) for name, pts in custom.items() if pts}
         self.trade_tag_map = self._build_trade_tag_map(orders)
         unique_tags = sorted({(o.get('tag') or '').strip() for o in orders if (o.get('tag') or '').strip()})
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list(); self.cb_prod.clear(); self.cb_prod.addItems(products)
@@ -1499,6 +1512,8 @@ class LogVisualizer(QMainWindow):
         t = self.current_df['timestamp'].to_numpy()
         if day == 'All' and 'day' in self.current_df.columns and not cont_ts: t = t + (self.current_df['day'].to_numpy() - min_day) * 1000000
         self._plot_t = t
+        self._bid_p_cols = sorted([c for c in self.current_df.columns if 'bid_price_' in c], key=lambda c: int(c.split('_')[-1]))
+        self._ask_p_cols = sorted([c for c in self.current_df.columns if 'ask_price_' in c], key=lambda c: int(c.split('_')[-1]))
         mid = self.current_df['mid_price'].to_numpy(); self.curve_mid.setData(t, mid)
         tags = self.cb_tag.checkedItems() if hasattr(self, 'cb_tag') and self.cb_tag.count() > 0 else []
         pnl_prod = self.cb_pnl_prod.currentText() if self.cb_pnl_prod.count() > 0 else prod
