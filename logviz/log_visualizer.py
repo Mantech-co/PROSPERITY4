@@ -3,6 +3,7 @@ from io import StringIO
 import numpy as np
 import polars as pl
 import pyqtgraph as pg
+pg.setConfigOptions(imageAxisOrder='row-major')
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -537,7 +538,9 @@ class LogVisualizer(QMainWindow):
         self._current_log_path = None
         self._gen_pane_minimized = False
         self._backtest_runner = None
-        pg.setConfigOptions(useOpenGL=True, imageAxisOrder='row-major')
+        # Disable OpenGL by default on Linux as it often causes rendering artifacts (gaps/missing pixels) in ImageItem
+        use_gl = sys.platform != 'linux' 
+        pg.setConfigOptions(useOpenGL=use_gl, imageAxisOrder='row-major')
         self._build_ui()
         self._restore_window_state()
         if log_path: self._load_file(log_path)
@@ -596,8 +599,8 @@ class LogVisualizer(QMainWindow):
         self.gw_m.installEventFilter(self)
         self.p_m = self.gw_m.addPlot(row=0, col=0); self.p_m.showGrid(x=True, y=True, alpha=0.3); self.p_m.setDownsampling(auto=True, mode='peak')
         self.p_gen = self.gw_m.addPlot(row=1, col=0); self.p_gen.showGrid(x=True, y=True, alpha=0.3); self.p_gen.setFixedHeight(200); self.p_gen.setXLink(self.p_m); self.p_gen.hideAxis('bottom'); self.p_gen.addLegend()
-        self.img_item = pg.ImageItem(); self.img_item.setZValue(0); self.p_m.addItem(self.img_item)
-        self.img_orders = pg.ImageItem(); self.img_orders.setZValue(1); self.p_m.addItem(self.img_orders); self.img_orders.setVisible(False)
+        self.img_item = pg.ImageItem(); self.img_item.setZValue(0); self.img_item.setAutoDownsample(False); self.p_m.addItem(self.img_item)
+        self.img_orders = pg.ImageItem(); self.img_orders.setZValue(1); self.img_orders.setAutoDownsample(False); self.p_m.addItem(self.img_orders); self.img_orders.setVisible(False)
         self.curve_mid = self.p_m.plot(pen=pg.mkPen(ACCENT_CYAN, width=2), name="Mid Price", clipToView=True)
         self.sc_bot = pg.ScatterPlotItem(symbol='x', size=7, brush=ACCENT_WHITE, name="Bot Trades"); self.sc_bot.setZValue(2)
         self.sc_buy = pg.ScatterPlotItem(symbol='t1', size=10, brush=ACCENT_CYAN, name="My Buy"); self.sc_buy.setZValue(3)
@@ -1080,12 +1083,16 @@ class LogVisualizer(QMainWindow):
             for pc in reversed(ask_p_cols):
                 lvl = pc.split('_')[-1]; vc = f'ask_volume_{lvl}'
                 p = row.get(pc); v = row.get(vc)
-                if p and v: row_line(f'ASK{lvl}', f'{p:.0f} &times; {int(v)}', ACCENT_ORANGE)
+                try:
+                    if p and v: row_line(f'ASK{lvl}', f'{float(p):.0f} &times; {int(float(v))}', ACCENT_ORANGE)
+                except (TypeError, ValueError): pass
             lines.append(f'&nbsp;&nbsp;{h(DIM, "&#9472;" * 16)}')
             for pc in bid_p_cols:
                 lvl = pc.split('_')[-1]; vc = f'bid_volume_{lvl}'
                 p = row.get(pc); v = row.get(vc)
-                if p and v: row_line(f'BID{lvl}', f'{p:.0f} &times; {int(v)}', ACCENT_CYAN)
+                try:
+                    if p and v: row_line(f'BID{lvl}', f'{float(p):.0f} &times; {int(float(v))}', ACCENT_CYAN)
+                except (TypeError, ValueError): pass
             lines.append('')
 
         # OB heatmap volume at cursor
@@ -1181,13 +1188,18 @@ class LogVisualizer(QMainWindow):
         for f in os.listdir(data_dir):
             if not f.endswith('.csv'): continue
             filepath = os.path.join(data_dir, f)
-            if f.startswith("prices_"): p_dfs.append(pl.read_csv(filepath, separator=";", null_values=['', 'nan']))
+            if f.startswith("prices_"):
+                df = pl.read_csv(filepath, separator=";", null_values=['', 'nan'])
+                df = df.rename({c: c.strip() for c in df.columns})
+                p_dfs.append(df)
             elif f.startswith("trades_"):
-                day_match = re.search(r"day_(-?\d+)", f); df = pl.read_csv(filepath, separator=";", null_values=['', 'nan'])
+                day_match = re.search(r"day_(-?\d+)", f)
+                df = pl.read_csv(filepath, separator=";", null_values=['', 'nan'])
+                df = df.rename({c: c.strip() for c in df.columns})
                 if day_match: df = df.with_columns(pl.lit(int(day_match.group(1))).alias("day"))
                 t_dicts.extend(df.to_dicts())
         if not p_dfs: return
-        df = pl.concat(p_dfs, how='diagonal_relaxed').sort(['day', 'timestamp'])
+        df = pl.concat(p_dfs, how='diagonal_relaxed').sort(['day', 'timestamp']).unique(subset=['day', 'timestamp', 'product'], keep='last')
         self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': [], 'orders': [], '_continuous_ts': _is_timestamps_continuous(df), '_min_day': df['day'].min() if 'day' in df.columns else 0}
         self.trade_tag_map = {}
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list()
@@ -1478,6 +1490,7 @@ class LogVisualizer(QMainWindow):
     def _process_selection(self):
         if not self.data or not self.cb_prod.currentText(): return
         prod, day = self.cb_prod.currentText(), self.cb_day.currentText()
+        if not day: return
         self.current_df = self.data['prices_df'].filter(pl.col('product') == prod)
         try:
             if day != 'All': self.current_df = self.current_df.filter(pl.col('day') == int(day))

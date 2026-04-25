@@ -50,7 +50,10 @@ def build_ob_heatmap(p_df, product, day, continuous_ts=False, buy_palette=None, 
 
     w, h = len(times), len(price_levels)
     raw_vol = np.zeros((h, w), dtype=float)
-    red_l, blue_l = np.zeros(h * w, np.uint8), np.zeros(h * w, np.uint8)
+    red_l = np.zeros(h * w, np.uint8)
+    blue_l = np.zeros(h * w, np.uint8)
+    has_r = np.zeros(h * w, bool)
+    has_b = np.zeros(h * w, bool)
 
     for side in ['bid', 'ask']:
         p_cols = bid_p_cols if side == 'bid' else ask_p_cols
@@ -59,26 +62,33 @@ def build_ob_heatmap(p_df, product, day, continuous_ts=False, buy_palette=None, 
             if vc not in flt.columns: continue
             pa = flt[pc].cast(pl.Float64, strict=False).to_numpy(allow_copy=True).astype(float)
             va = flt[vc].cast(pl.Float64, strict=False).to_numpy(allow_copy=True).astype(float)
-            mask = np.isfinite(pa) & (pa > 0)
+            mask = np.isfinite(pa) & (pa > 0) & np.isfinite(va) & (va > 0)
             v_idx = np.where(mask)[0]
             if len(v_idx) == 0: continue
             y_idxs = np.clip(np.round((pa[mask] - p_min) / step).astype(np.int64), 0, h - 1)
             flat_idxs = y_idxs * w + v_idx.astype(np.int64)
-            
+
             lvl = np.clip(va[mask] / max_vol * 10, 0, 9).astype(np.uint8)
-            np.maximum.at(red_l if side == 'ask' else blue_l, flat_idxs, lvl)
-            raw_vol.flat[flat_idxs] += va[mask]
+            if side == 'ask':
+                np.maximum.at(red_l, flat_idxs, lvl)
+                has_r[flat_idxs] = True
+            else:
+                np.maximum.at(blue_l, flat_idxs, lvl)
+                has_b[flat_idxs] = True
+            np.add.at(raw_vol.reshape(-1), flat_idxs, va[mask])
 
     img = np.zeros((h, w, 4), np.uint8)
     red_img_l = red_l.reshape(h, w)
     blue_img_l = blue_l.reshape(h, w)
-    
+    has_r_2d = has_r.reshape(h, w)
+    has_b_2d = has_b.reshape(h, w)
+
     for l in range(10):
-        mask_r = (red_img_l == l) & (red_img_l > 0)
+        mask_r = (red_img_l == l) & has_r_2d
         if np.any(mask_r):
             img[mask_r] = sell_palette[l] + [200]
-            
-        mask_b = (blue_img_l == l) & (blue_img_l > 0)
+
+        mask_b = (blue_img_l == l) & has_b_2d
         if np.any(mask_b):
             img[mask_b] = buy_palette[l] + [200]
 
@@ -151,10 +161,19 @@ def build_order_placement_heatmap(orders, product, day, times, continuous_ts=Fal
 def get_rect(times, levels):
     if len(times) < 1 or len(levels) < 1:
         return QRectF(0, 0, 1, 1)
-    x_min, x_max = times[0], times[-1]
-    y_min, y_max = levels[0], levels[-1]
-    x_step = (times[1] - times[0]) if len(times) > 1 else 100
+    
+    x_min = times[0]
+    if len(times) > 1:
+        x_step = (times[-1] - times[0]) / (len(times) - 1)
+    else:
+        x_step = 100.0
+        
+    y_min = levels[0]
+    if len(levels) > 1:
+        y_step = (levels[1] - levels[0]) / (len(levels) - 1)
+    else:
+        y_step = 1.0
+        
     # Align pixels: the coordinate (ts, price) should be the CENTER of the pixel.
     # So left edge is ts - 0.5 * step, right edge is ts + 0.5 * step.
-    # Total width = (num_pixels) * x_step.
-    return QRectF(x_min - 0.5 * x_step, y_min - 0.5, len(times) * x_step, len(levels))
+    return QRectF(x_min - 0.5 * x_step, y_min - 0.5 * y_step, len(times) * x_step, len(levels) * y_step)
