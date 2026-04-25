@@ -1,0 +1,5 @@
+We have 2 bids, lower and higher bid, excluding influence of average bid in profit, if you optimise just b1 and b2, you get an optimal b1 and b2 such that b1 and b2 split full range into 3 equal parts. (confirmed using hand calculation and claude)
+
+Now, considering influence of mean_b2, assume everyone puts optimal b2, mean_b2 = b2, and, for any mean that is less than b2, also there is no influence on our profit, the only case where we get screwed is if mean_b2 goes higher than our b2. but because everyone wants max profit, I think it is safe to assume that everyone will put optimaml b2. Putting higher than that just drops profit, and hence mean also must be optimal b2.
+
+The only case when someone doesn't do optimal stuff is if they do not understand wtf  is going on. So they would ask claude or other AI. Claude is able to give optimal values. Hence, I think it is just best we put optimal values.

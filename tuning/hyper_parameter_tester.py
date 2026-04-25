@@ -31,22 +31,19 @@ sys.path.insert(0, str(PROJECT_ROOT / "prosperity4bt"))
 BACKTEST_OUTPUT_DIR = PROJECT_ROOT / "backtests" / "tuning_runs"
 
 # ── Parameter Grid ────────────────────────────────────────────────────────────
-# Edit these ranges to control what gets tested.
-# Each key must match a key in tomato_params.json.
 PARAM_GRID = {
-    "m_slope":         list(range(20, 40, 1)),
-    "slope_threshold": [i/100 for i in range(0, 20, 1)],
+    "z_threshold": [round(v * 0.25, 2) for v in range(2, 21)],  # 0.5 .. 5.0
 }
 
 # Fixed params (not swept, but always written)
 FIXED_PARAMS = {
-    "alpha": 0.5,
-    "n_sma": 20,
-    "position_limit": 80,
+    "z_window": 20,
+    "position_limit": 200,
 }
 
 # Backtest config
-ROUND_DAY = ["0"]
+ROUND_DAY = ["3-0", "3-1", "3-2"]
+DATA_DIR = PROJECT_ROOT / "data"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -110,6 +107,7 @@ def _run_single_backtest(combo: dict, product: str, output_file: Path, index: in
         run_backtest(
             trader_class=Trader,
             round_day=ROUND_DAY,
+            data_dir=DATA_DIR,
             output_file=str(output_file),
             print_output=False,
             show_progress=False,
@@ -235,8 +233,8 @@ def main():
         help="Max parallel workers (default: min(cpu_count, 4))",
     )
     parser.add_argument(
-        "--product", type=str, default="TOMATOES",
-        help="Product name for log tagging (default: TOMATOES)",
+        "--product", type=str, default="HYDROGEL_PACK",
+        help="Product name for log tagging (default: HYDROGEL_PACK)",
     )
     args = parser.parse_args()
     product = args.product

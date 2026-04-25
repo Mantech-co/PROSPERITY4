@@ -1,13 +1,16 @@
 import json
 import math
-from typing import List, Dict, Any, Optional, Tuple
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 from datamodel import OrderDepth, TradingState, Order, Trade
 
-TUNING_PARAMS = {
-    "z_window": 20,
-    "z_threshold": 2.0,
-    "position_limit": 50,
-}
+_PARAMS_FILE = Path(__file__).parent / "params.json"
+if _PARAMS_FILE.exists():
+    with open(_PARAMS_FILE) as _f:
+        TUNING_PARAMS = json.load(_f)
+else:
+    TUNING_PARAMS = {}
+
 
 class Logger:
     PREFIX = 'LOGVIZ:'
@@ -53,7 +56,7 @@ class BaseStrategy:
     def __init__(self, logger: Logger, params: Dict[str, Any]):
         self.logger = logger
         self.params = params
-        self.limit = params.get("position_limit", 50)
+        self.limit = params.get("position_limit", 100)
         self.orders: List[Order] = []
         self.state: Optional[TradingState] = None
         self.order_depth: Optional[OrderDepth] = None
@@ -91,65 +94,119 @@ class BaseStrategy:
             merged[o.price] = merged.get(o.price, 0) + o.quantity
         return [Order(self.PRODUCT, price, qty) for price, qty in merged.items() if qty != 0]
 
-    def mid_price(self) -> Optional[float]:
-        bids = self.order_depth.buy_orders
-        asks = self.order_depth.sell_orders
-        if not bids or not asks:
-            return None
-        return (max(bids) + min(asks)) / 2.0
+    def run(self, state_dict: Dict[str, Any]) -> List[Order]:
+        return []
 
 
-class HydrogelPackStrategy(BaseStrategy):
-    PRODUCT = "HYDROGEL_PACK"
+WINDOW  = 10
+ENTRY_Z = 0.85
+EXIT_Z  = 0.84
+
+
+def _zscore(buf: List[float], price: float):
+    n = len(buf)
+    mu = sum(buf) / n
+    sigma = (sum((x - mu) ** 2 for x in buf) / n) ** 0.5
+    if sigma < 1e-9:
+        return None
+    return (price - mu) / sigma
+
+
+class VelvetfruitSignal:
+    """Reads VELVETFRUIT_EXTRACT mid price, computes z-score, writes signal to state_dict."""
+    PRODUCT = "VELVETFRUIT_EXTRACT"
+
+    def __init__(self, logger: Logger):
+        self.logger = logger
+
+    def update(self, state: TradingState, state_dict: Dict[str, Any]) -> Optional[int]:
+        od = state.order_depths.get(self.PRODUCT)
+        if od is None:
+            return state_dict.get("vf_signal", 0)
+
+        best_bid = max(od.buy_orders.keys(), default=None)
+        best_ask = min(od.sell_orders.keys(), default=None)
+        if best_bid is None or best_ask is None:
+            return state_dict.get("vf_signal", 0)
+
+        mid = (best_bid + best_ask) / 2.0
+
+        buf: List[float] = state_dict.get("vf_buf", [])
+        buf.append(mid)
+        if len(buf) > WINDOW:
+            buf = buf[-WINDOW:]
+        state_dict["vf_buf"] = buf
+
+        if len(buf) < WINDOW:
+            return 0
+
+        z = _zscore(buf[:-1], mid)
+        if z is None:
+            return state_dict.get("vf_signal", 0)
+
+        signal: int = state_dict.get("vf_signal", 0)
+        if signal == 0:
+            if z < -ENTRY_Z:
+                signal = 1
+            elif z > ENTRY_Z:
+                signal = -1
+        elif signal == 1 and z >= -EXIT_Z:
+            signal = 0
+        elif signal == -1 and z <= EXIT_Z:
+            signal = 0
+
+        state_dict["vf_signal"] = signal
+        state_dict["vf_z"] = z
+        self.logger.log(vf_z=z, vf_mid=mid, vf_signal=signal)
+        return signal
+
+
+class Vev5200Strategy(BaseStrategy):
+    PRODUCT = "VEV_5200"
+
+    def _take_asks(self, qty: int, tag: str):
+        for price in sorted(self.order_depth.sell_orders.keys()):
+            if self.buy_capacity <= 0 or qty <= 0:
+                break
+            vol = min(abs(self.order_depth.sell_orders[price]), qty, self.buy_capacity)
+            self.bid(price, vol, tag=tag)
+            qty -= vol
+
+    def _take_bids(self, qty: int, tag: str):
+        for price in sorted(self.order_depth.buy_orders.keys(), reverse=True):
+            if self.sell_capacity <= 0 or qty <= 0:
+                break
+            vol = min(abs(self.order_depth.buy_orders[price]), qty, self.sell_capacity)
+            self.ask(price, vol, tag=tag)
+            qty -= vol
 
     def run(self, state_dict: Dict[str, Any]) -> List[Order]:
-        mid = self.mid_price()
-        if mid is None:
-            return []
+        signal: int = state_dict.get("vf_signal", 0)
 
-        window = self.params.get("z_window", 20)
-        threshold = self.params.get("z_threshold", 2.0)
+        self.logger.log(vev_pos=self.current_pos, vev_signal=signal)
 
-        prices = state_dict.get("HP_PRICES", [])
-        prices.append(mid)
-        if len(prices) > window:
-            prices.pop(0)
-        state_dict["HP_PRICES"] = prices
-
-        self.logger.log(mid=mid)
-
-        if len(prices) < window:
-            return []
-
-        mean = sum(prices) / len(prices)
-        variance = sum((x - mean) ** 2 for x in prices) / len(prices)
-        std = math.sqrt(variance) if variance > 0 else 1e-6
-        z = (mid - mean) / std
-
-        self.logger.log(z_score=z)
-
-        best_bid = max(self.order_depth.buy_orders)
-        best_ask = min(self.order_depth.sell_orders)
-
-        if z > threshold:
-            # overpriced → sell at best bid (aggressive)
-            self.ask(best_bid, self.sell_capacity, tag="Z_SELL")
-        elif z < -threshold:
-            # underpriced → buy at best ask (aggressive)
-            self.bid(best_ask, self.buy_capacity, tag="Z_BUY")
+        if signal == 1:
+            if self.buy_capacity > 0:
+                self._take_asks(self.buy_capacity, tag="ENTER_LONG")
+        elif signal == -1:
+            if self.sell_capacity > 0:
+                self._take_bids(self.sell_capacity, tag="ENTER_SHORT")
+        else:
+            if self.current_pos > 0:
+                self._take_bids(self.current_pos, tag="EXIT_LONG")
+            elif self.current_pos < 0:
+                self._take_asks(abs(self.current_pos), tag="EXIT_SHORT")
 
         return self._consolidate()
 
 
 class Trader:
     def __init__(self):
-        self.logger = Logger()
-        self.hydrogel_params = {
-            "z_window": TUNING_PARAMS["z_window"],
-            "z_threshold": TUNING_PARAMS["z_threshold"],
-            "position_limit": TUNING_PARAMS["position_limit"],
-        }
-        self.hydrogel_strat = HydrogelPackStrategy(self.logger, self.hydrogel_params)
+        self.logger  = Logger()
+        self.signal  = VelvetfruitSignal(self.logger)
+        self.vev_strat = Vev5200Strategy(self.logger, {
+            "position_limit": 300,
+        })
 
     def run(self, state: TradingState):
         result: Dict[str, List[Order]] = {}
@@ -158,8 +215,12 @@ class Trader:
         except Exception:
             state_dict = {}
 
-        if "HYDROGEL_PACK" in state.order_depths:
-            self.hydrogel_strat.reset(state)
-            result["HYDROGEL_PACK"] = self.hydrogel_strat.run(state_dict)
+        # 1. compute signal from VELVETFRUIT_EXTRACT
+        self.signal.update(state, state_dict)
+
+        # 2. execute on VEV_5200
+        if "VEV_5200" in state.order_depths:
+            self.vev_strat.reset(state)
+            result["VEV_5200"] = self.vev_strat.run(state_dict)
 
         return result, 0, json.dumps(state_dict)

@@ -137,7 +137,7 @@ class TestRunner:
             if not product_orders:
                 continue
             product_position = state.position.get(product, 0)
-            limit = LIMITS[product]
+            limit = LIMITS.get(product, 100)
 
             # --- Clip buy orders ---
             # Sort by price descending (most aggressive first) so we keep the best bids

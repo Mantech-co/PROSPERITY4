@@ -134,17 +134,22 @@ def build_order_placement_heatmap(orders, product, day, times, continuous_ts=Fal
 
     vols = [o['qty'] for o in flt]
     max_vol = max(vols) if vols else 1.0
-    ts_to_idx = {ts: i for i, ts in enumerate(times)}
+    times_i64 = times.astype(np.int64)
 
     for o in flt:
-        ts = o['ts']
+        ts = int(o['ts'])
         if day == 'All' and not continuous_ts:
-            ts += (o['day'] - min_day) * 1_000_000
+            ts += (int(o.get('day', 0)) - int(min_day)) * 1_000_000
 
-        if ts not in ts_to_idx:
+        # Find nearest timestamp index
+        idx = np.searchsorted(times_i64, ts)
+        if idx > 0 and (idx == len(times_i64) or abs(ts - times_i64[idx-1]) < abs(ts - times_i64[idx])):
+            idx -= 1
+        
+        if idx < 0 or idx >= w or abs(ts - times_i64[idx]) > 5000: # Max 5s deviation
             continue
 
-        x = ts_to_idx[ts]
+        x = idx
         y = int(round((o['price'] - p_min) / step))
         if y < 0 or y >= h:
             continue
@@ -173,6 +178,7 @@ def get_rect(times, levels):
         y_step = (levels[-1] - levels[0]) / (len(levels) - 1)
     else:
         y_step = 1.0
+
         
     # Align pixels: the coordinate (ts, price) should be the CENTER of the pixel.
     # So left edge is ts - 0.5 * step, right edge is ts + 0.5 * step.

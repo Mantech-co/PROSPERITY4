@@ -4,8 +4,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from datamodel import OrderDepth, TradingState, Order, Trade
 
 TUNING_PARAMS = {
-    "position_limit": 20,
-    "spread": 2,  # half-spread from mid
+    "position_limit": 200,
+    "spread": -1,  # half-spread from mid
 }
 
 class Logger:
@@ -126,7 +126,7 @@ class MarketOrderRemoverStrategy(BaseStrategy):
     Absorbs all incoming market orders (orders priced through mid) and
     replaces them with passive limit bids/asks at mid ± spread.
     """
-    PRODUCT = "PRODUCT_NAME"  # override per product
+    PRODUCT = "HYDROGEL_PACK"
 
     def run(self, state_dict: Dict[str, Any]) -> List[Order]:
         mid = self.mid_price()
@@ -152,8 +152,8 @@ class MarketOrderRemoverStrategy(BaseStrategy):
         bid_price = math.floor(mid) - spread
         ask_price = math.ceil(mid) + spread
 
-        if self.buy_capacity > 0:
-            self.bid(bid_price, self.buy_capacity, tag="PASSIVE_BID")
+        # if self.buy_capacity > 0:
+        #     self.bid(bid_price, self.buy_capacity, tag="PASSIVE_BID")
         if self.sell_capacity > 0:
             self.ask(ask_price, self.sell_capacity, tag="PASSIVE_ASK")
 
@@ -169,7 +169,7 @@ class Trader:
             "price_threshold": 3.0,
         }
         self.strategies: Dict[str, BaseStrategy] = {
-            # "PRODUCT_NAME": MarketOrderRemoverStrategy(self.logger, self.params),
+            "HYDROGEL_PACK": MarketOrderRemoverStrategy(self.logger, self.params),
         }
 
     def run(self, state: TradingState):

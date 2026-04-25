@@ -480,9 +480,139 @@ class SubmitProgressDialog(QDialog):
         self.lbl_status.setStyleSheet(f"color: {color}; font-weight: bold;")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TRACKER INTEGRATION (Standalone Reproduction)
+# ══════════════════════════════════════════════════════════════════════════════
+
+TRACKER_REPO = "ManukrishnanP/prosperity4-strategy-tracker"
+TRACKER_TOKEN = "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"
+
+def _safe_float(val, default=0.0):
+    try:
+        f = float(val); return f if f == f else default
+    except (TypeError, ValueError): return default
+
+def _compute_sharpe_tracker(pnl_series):
+    if len(pnl_series) < 2: return 0.0
+    deltas = [pnl_series[i] - pnl_series[i - 1] for i in range(1, len(pnl_series))]
+    n = len(deltas); mean = sum(deltas) / n
+    variance = sum((d - mean) ** 2 for d in deltas) / n
+    std = variance ** 0.5
+    return (mean / std * 1000.0) if std > 0 else 0.0
+
+def _compute_drawdown_tracker(pnl_series):
+    if not pnl_series: return 0.0, 0.0
+    peak = pnl_series[0]; max_dd_abs = max_dd_pct = 0.0
+    for v in pnl_series:
+        if v > peak: peak = v
+        dd_abs = peak - v
+        if dd_abs > max_dd_abs: max_dd_abs = dd_abs
+        if peak > 0:
+            dd_pct = dd_abs / peak * 100.0
+            if dd_pct > max_dd_pct: max_dd_pct = dd_pct
+    return max_dd_abs, max_dd_pct
+
+def extract_tracker_metrics(log_path):
+    with open(log_path, encoding="utf-8") as fh: raw = json.load(fh)
+    csv_str = (raw.get("activitiesLog", "") or "").replace("\\n", "\n").strip()
+    import csv
+    reader = csv.DictReader(StringIO(csv_str), delimiter=";")
+    rows = [{k.strip(): v for k, v in row.items()} for row in reader] if csv_str else []
+    
+    products_seen = set(); days_seen = set(); ts_product_pnl = {}
+    for row in rows:
+        prod = (row.get("product") or "").strip()
+        if not prod: continue
+        products_seen.add(prod); ts = _safe_float(row.get("timestamp", 0))
+        pnl = _safe_float(row.get("profit_and_loss", 0)); raw_day = row.get("day")
+        day_val = None
+        if raw_day is not None and str(raw_day).strip() not in ("", "nan", "None"):
+            try: day_val = int(float(raw_day)); days_seen.add(day_val)
+            except: pass
+        key = (day_val or 0, int(ts)); ts_product_pnl.setdefault(key, {})[prod] = pnl
+
+    sorted_keys = sorted(ts_product_pnl.keys())
+    agg_pnl_series = [sum(ts_product_pnl[k].values()) for k in sorted_keys]
+    total_pnl = agg_pnl_series[-1] if agg_pnl_series else 0.0
+    sharpe = _compute_sharpe_tracker(agg_pnl_series)
+    max_dd_abs, max_dd_pct = _compute_drawdown_tracker(agg_pnl_series)
+
+    pnl_series_storage = []
+    if agg_pnl_series:
+        if len(agg_pnl_series) > 500:
+            step = len(agg_pnl_series) / 500.0
+            pnl_series_storage = [round(agg_pnl_series[int(i * step)], 2) for i in range(500)]
+            if round(agg_pnl_series[-1], 2) != pnl_series_storage[-1]: pnl_series_storage.append(round(agg_pnl_series[-1], 2))
+        else: pnl_series_storage = [round(v, 2) for v in agg_pnl_series]
+
+    per_product_pnl = {}
+    for key in sorted_keys:
+        for p, v in ts_product_pnl[key].items(): per_product_pnl[p] = v
+
+    trades = raw.get("tradeHistory", []) or []; sub_trades = sub_vol = 0
+    for tr in trades:
+        if str(tr.get("buyer", "")).upper() == "SUBMISSION" or str(tr.get("seller", "")).upper() == "SUBMISSION":
+            sub_trades += 1; sub_vol += int(tr.get("quantity", 0))
+
+    return {
+        "total_pnl": round(total_pnl, 4), "sharpe": round(sharpe, 6),
+        "max_drawdown_abs": round(max_dd_abs, 4), "max_drawdown_pct": round(max_dd_pct, 4),
+        "products": sorted(products_seen), "days": sorted(days_seen),
+        "per_product_pnl": {k: round(v, 4) for k, v in per_product_pnl.items()},
+        "pnl_series": pnl_series_storage, "total_trades": len(trades),
+        "submission_trades": sub_trades, "submission_volume": sub_vol,
+        "has_error": bool(raw.get("error")),
+    }
+
+class GitHubRepo:
+    API_BASE = "https://api.github.com"
+    def __init__(self, repo, token): self.repo = repo; self.token = token
+    def _headers(self):
+        return {"Authorization": f"token {self.token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"}
+    def _request(self, method, path, body=None):
+        import urllib.request
+        url = f"{self.API_BASE}/repos/{self.repo}/contents/{path}"
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(url, data=data, headers=self._headers(), method=method)
+        with urllib.request.urlopen(req) as resp: return json.loads(resp.read().decode())
+    def get_file_sha(self, path):
+        import urllib.request, urllib.error
+        url = f"{self.API_BASE}/repos/{self.repo}/contents/{path}"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=self._headers())) as resp:
+                return json.loads(resp.read().decode()).get("sha")
+        except urllib.error.HTTPError as e:
+            if e.code == 404: return None
+            raise
+    def put_file(self, path, content_bytes, message):
+        import base64
+        sha = self.get_file_sha(path)
+        body = {"message": message, "content": base64.b64encode(content_bytes).decode()}
+        if sha: body["sha"] = sha
+        return self._request("PUT", path, body)["content"]["sha"]
+    def list_directory(self, path):
+        import urllib.request, urllib.error
+        url = f"{self.API_BASE}/repos/{self.repo}/contents/{path}"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=self._headers())) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 404: return []
+            raise
+    def get_file_content(self, path):
+        import urllib.request, urllib.error, base64
+        url = f"{self.API_BASE}/repos/{self.repo}/contents/{path}"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=self._headers())) as resp:
+                data = json.loads(resp.read().decode())
+                return base64.b64decode(data["content"].replace("\n", "")) if "content" in data else None
+        except urllib.error.HTTPError as e:
+            if e.code == 404: return None
+            raise
+
 class SubmitWorker(QThread):
     status = pyqtSignal(str)
-    done = pyqtSignal(bool, str)
+    done = pyqtSignal(bool, str, str) # success, message, zip_path
 
     def __init__(self, token, file_path, round_id, logviz_dir, logs_dir):
         super().__init__()
@@ -508,15 +638,210 @@ class SubmitWorker(QThread):
                 if status not in ACTIVE_STATUSES: break
                 time.sleep(POLL_INTERVAL)
             if status not in ("DONE", "FINISHED"):
-                self.done.emit(False, f"Ended with status: {status}"); return
+                self.done.emit(False, f"Ended with status: {status}", ""); return
             self.status.emit("Fetching results zip...")
             zip_path = fetch_zip(self.token, sub_id, self.logs_dir)
             self.status.emit(f"Downloaded: {os.path.basename(str(zip_path))}")
             self.status.emit("Extracting logs to logviz/...")
             unzip_and_move(zip_path, self.logviz_dir)
-            self.done.emit(True, "Done!")
+            self.done.emit(True, "Done!", str(zip_path))
+        except Exception as e:
+            self.done.emit(False, str(e), "")
+
+
+class TrackerDialog(QDialog):
+    def __init__(self, default_author="", default_strat="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Submit to Strategy Tracker"); self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        
+        layout.addWidget(QLabel("<b>Zip File:</b>"))
+        h = QHBoxLayout()
+        self.zip_input = QLineEdit(); h.addWidget(self.zip_input)
+        btn_zip = QPushButton("..."); btn_zip.clicked.connect(self._browse_zip); h.addWidget(btn_zip)
+        layout.addLayout(h)
+
+        row1 = QHBoxLayout()
+        v1 = QVBoxLayout(); v1.addWidget(QLabel("<b>Author:</b>")); self.author_input = QLineEdit(default_author); v1.addWidget(self.author_input); row1.addLayout(v1)
+        v2 = QVBoxLayout(); v2.addWidget(QLabel("<b>Strategy:</b>")); self.strat_input = QLineEdit(default_strat); v2.addWidget(self.strat_input); row1.addLayout(v2)
+        v3 = QVBoxLayout(); v3.addWidget(QLabel("<b>Round:</b>")); self.round_input = QLineEdit("3"); self.round_input.setFixedWidth(40); v3.addWidget(self.round_input); row1.addLayout(v3)
+        layout.addLayout(row1)
+
+        layout.addWidget(QLabel("<b>Notes:</b>"))
+        self.notes_input = QLineEdit(); layout.addWidget(self.notes_input)
+        
+        layout.addSpacing(10)
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("🚀 Upload to GitHub"); btn_ok.clicked.connect(self.accept)
+        btn_ok.setStyleSheet(f"background-color: {ACCENT_CYAN}; color: {BG}; font-weight: bold; padding: 8px;")
+        btn_cancel = QPushButton("Cancel"); btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(btn_ok); btns.addWidget(btn_cancel); layout.addLayout(btns)
+
+    def _browse_zip(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Strategy Zip", self.zip_input.text(), "Zip (*.zip)")
+        if path: self.zip_input.setText(path)
+
+
+def upload_run_standalone(zip_path, author, strategy_name, notes, metrics, config_data, repo, token, round_num=1):
+    import re, time, uuid, json
+    from datetime import datetime, timezone
+    run_ts = datetime.now(timezone.utc).isoformat()
+    slug = re.sub(r"[^a-z0-9_]", "_", author.lower())
+    run_id = f"{slug}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    record = {"run_id": run_id, "author": author, "strategy_name": strategy_name, "round": round_num, "notes": notes, "uploaded_at": run_ts, "config": config_data, "metrics": metrics, "artifact_path": f"artifacts/{run_id}.zip"}
+    gh = GitHubRepo(repo, token)
+    with open(zip_path, "rb") as fh: zip_bytes = fh.read()
+    gh.put_file(f"artifacts/{run_id}.zip", zip_bytes, f"artifact: {author}/{strategy_name} [{run_id}]")
+    gh.put_file(f"records/{run_id}.json", json.dumps(record, indent=2).encode(), f"record: {author}/{strategy_name} [{run_id}]")
+    return run_id
+
+def fetch_records_standalone(repo, token):
+    gh = GitHubRepo(repo, token); entries = gh.list_directory("records"); records = []
+    for entry in entries:
+        if not entry.get("name", "").endswith(".json"): continue
+        content = gh.get_file_content(entry["path"])
+        if content:
+            try: records.append(json.loads(content.decode()))
+            except: pass
+    return records
+
+def fetch_hidden_standalone(repo, token):
+    gh = GitHubRepo(repo, token)
+    content = gh.get_file_content("records/.hidden.json")
+    if content:
+        try: return set(json.loads(content.decode()))
+        except: pass
+    return set()
+
+def set_hidden_standalone(repo, token, hidden_ids):
+    gh = GitHubRepo(repo, token)
+    gh.put_file("records/.hidden.json", json.dumps(list(hidden_ids)).encode(), "Update hidden runs")
+
+
+class TrackerWorker(QThread):
+    status = pyqtSignal(str)
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, zip_path, author, strat, notes, round_num):
+        super().__init__()
+        self.zip_path = zip_path; self.author = author; self.strat = strat
+        self.notes = notes; self.round_num = round_num
+
+    def run(self):
+        try:
+            repo = TRACKER_REPO; token = TRACKER_TOKEN
+            if not repo or not token: raise RuntimeError("TRACKER_REPO/TOKEN not set")
+            self.status.emit("Validating zip and extracting metrics...")
+            # Reproduced _validate_and_extract_log logic inline
+            import zipfile, tempfile
+            with zipfile.ZipFile(self.zip_path) as zf:
+                names = zf.namelist(); by_ext = {}
+                for n in names: by_ext.setdefault(os.path.splitext(n)[1].lower(), []).append(n)
+                if not {".py", ".log", ".json"}.issubset(set(by_ext)): raise ValueError("Zip missing required files (.py, .log, .json)")
+                log_bytes = zf.read(by_ext[".log"][0]); config_bytes = zf.read(by_ext[".json"][0])
+            tmp_fd, tmp_p = tempfile.mkstemp(suffix=".log")
+            try:
+                with os.fdopen(tmp_fd, "wb") as fh: fh.write(log_bytes)
+                metrics = extract_tracker_metrics(tmp_p)
+            finally:
+                if os.path.exists(tmp_p): os.unlink(tmp_p)
+            try: config_data = json.loads(config_bytes.decode())
+            except: config_data = {}
+            
+            self.status.emit(f"Uploading to {repo}...")
+            run_id = upload_run_standalone(self.zip_path, self.author, self.strat, self.notes, metrics, config_data, repo, token, self.round_num)
+            self.done.emit(True, f"Success! Run ID: {run_id}")
+        except Exception as e: self.done.emit(False, str(e))
+
+
+class LeaderboardWorker(QThread):
+    status = pyqtSignal(str)
+    done = pyqtSignal(list, set, str) # runs, hidden, error
+
+    def run(self):
+        try:
+            repo = TRACKER_REPO; token = TRACKER_TOKEN
+            if not repo or not token: raise RuntimeError("TRACKER_REPO/TOKEN not set")
+            self.status.emit("Fetching leaderboard...")
+            runs = fetch_records_standalone(repo, token)
+            self.status.emit("Fetching hidden list...")
+            hidden = fetch_hidden_standalone(repo, token)
+            self.done.emit(runs, hidden, "")
+        except Exception as e: self.done.emit([], set(), str(e))
+
+class HideRunWorker(QThread):
+    done = pyqtSignal(bool, str)
+    def __init__(self, hidden_ids):
+        super().__init__()
+        self.hidden_ids = hidden_ids
+    def run(self):
+        try:
+            set_hidden_standalone(TRACKER_REPO, TRACKER_TOKEN, self.hidden_ids)
+            self.done.emit(True, "Hidden list updated.")
         except Exception as e:
             self.done.emit(False, str(e))
+
+
+
+class RunDetailsDialog(QDialog):
+    def __init__(self, run, is_hidden, parent=None):
+        super().__init__(parent)
+        self.run = run
+        self.setWindowTitle(f"Run Details: {run.get('strategy_name', 'Unknown')}")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(480)
+        layout = QVBoxLayout(self)
+        
+        info_layout = QHBoxLayout()
+        left_form = QVBoxLayout()
+        def add_field(label, val, color=TEXT):
+            row = QHBoxLayout(); row.addWidget(QLabel(f"<b>{label}:</b>")); lbl = QLabel(str(val))
+            lbl.setStyleSheet(f"color: {color};"); row.addWidget(lbl); row.addStretch(); left_form.addLayout(row)
+
+        add_field("Author", run.get("author", "Unknown"), ACCENT_CYAN)
+        add_field("Strategy", run.get("strategy_name", "Unknown"), ACCENT_GOLD)
+        add_field("Uploaded", run.get("uploaded_at", "Unknown")[:19].replace('T', ' '))
+        add_field("Round", run.get("round", "Unknown"))
+        add_field("ID", run.get("run_id", "Unknown"), DIM)
+        info_layout.addLayout(left_form)
+        
+        m_frame = QFrame(); m_frame.setStyleSheet(f"background: {PANEL_BG}; border: 1px solid {BORDER}; border-radius: 4px;")
+        m_layout = QGridLayout(m_frame); info_layout.addWidget(m_frame)
+        metrics = run.get("metrics", {})
+        pnl_val = metrics.get('total_pnl', metrics.get('total_profit', 0))
+        fields = [
+            ("Score", f"{pnl_val:,.0f}", ACCENT_GREEN if pnl_val >= 0 else ACCENT_RED),
+            ("Sharpe", f"{metrics.get('sharpe', 0):.3f}", ACCENT_CYAN),
+            ("Max DD", f"{metrics.get('max_drawdown_pct', 0):.2f}%", ACCENT_RED if metrics.get('max_drawdown_pct', 0) > 10 else ACCENT_ORANGE),
+            ("Trades", f"{metrics.get('submission_trades', 0):,}", TEXT),
+            ("Volume", f"{metrics.get('submission_volume', 0):,}", TEXT),
+            ("Products", f"{len(metrics.get('products', []))}", TEXT),
+        ]
+        for i, (l, v, c) in enumerate(fields):
+            m_layout.addWidget(QLabel(l), i//2, (i%2)*2); vl = QLabel(v); vl.setStyleSheet(f"color: {c}; font-weight: bold;")
+            m_layout.addWidget(vl, i//2, (i%2)*2 + 1)
+        layout.addLayout(info_layout)
+        
+        self.gw = pg.GraphicsLayoutWidget(); self.gw.setBackground(BG); self.gw.setFixedHeight(200)
+        self.pnl_plot = self.gw.addPlot(title="PnL Curve")
+        self.pnl_plot.showGrid(x=True, y=True, alpha=0.3)
+        pnl_series = metrics.get('pnl_series', [])
+        if pnl_series:
+            color = ACCENT_GREEN if pnl_series[-1] >= 0 else ACCENT_RED
+            self.pnl_plot.plot(pnl_series, fillLevel=0, brush=pg.mkBrush(color + '40'), pen=pg.mkPen(color, width=2))
+        layout.addWidget(self.gw)
+
+        layout.addWidget(QLabel("<b>Notes:</b>"))
+        notes = QLabel(run.get("notes", "No notes provided.")); notes.setWordWrap(True)
+        notes.setStyleSheet(f"background: {PANEL_BG}; padding: 8px; border-radius: 4px; color: {TEXT};")
+        layout.addWidget(notes)
+
+        btns = QHBoxLayout()
+        self.btn_hide = QPushButton("Unhide Run" if is_hidden else "Hide Run")
+        self.btn_hide.setStyleSheet(f"background-color: {ACCENT_RED if not is_hidden else DIM}; color: {ACCENT_WHITE}; font-weight: bold;")
+        btns.addWidget(self.btn_hide); btns.addStretch()
+        btn_close = QPushButton("Close"); btn_close.clicked.connect(self.accept); btns.addWidget(btn_close)
+        layout.addLayout(btns)
 
 
 class LogVisualizer(QMainWindow):
@@ -538,6 +863,7 @@ class LogVisualizer(QMainWindow):
         self._plot_t = None
         self.sandbox_msgs = {}
         self._current_log_path = None
+        self._last_zip_path = None
         self._gen_pane_minimized = False
         self._backtest_runner = None
         # Disable OpenGL by default on Linux as it often causes rendering artifacts (gaps/missing pixels) in ImageItem
@@ -553,7 +879,8 @@ class LogVisualizer(QMainWindow):
         controls = QHBoxLayout(); controls.setContentsMargins(12, 12, 12, 12); controls.setSpacing(12)
         btn_open = QPushButton("📂 Open Log"); btn_open.clicked.connect(self._open_dialog); controls.addWidget(btn_open)
         self.btn_backtest = QPushButton("⟳ Refresh Backtest"); self.btn_backtest.clicked.connect(self._run_backtest); self.btn_backtest.setVisible(False); controls.addWidget(self.btn_backtest)
-        self.btn_submit = QPushButton("🚀 Submit"); self.btn_submit.clicked.connect(self._on_submit_clicked); self.btn_submit.setVisible(False); controls.addWidget(self.btn_submit)
+        self.btn_submit = QPushButton("🚀 Submit"); self.btn_submit.clicked.connect(self._on_submit_clicked); self.btn_submit.setVisible(True); controls.addWidget(self.btn_submit)
+        self.btn_tracker = QPushButton("📈 Tracker"); self.btn_tracker.clicked.connect(self._on_tracker_clicked); controls.addWidget(self.btn_tracker)
         btn_import = QPushButton("📊 Import Data"); btn_import.clicked.connect(self._import_data); controls.addWidget(btn_import)
         controls.addWidget(QLabel("Product:")); self.cb_prod = QComboBox(); controls.addWidget(self.cb_prod)
         controls.addWidget(QLabel("Day:")); self.cb_day = QComboBox(); controls.addWidget(self.cb_day)
@@ -569,6 +896,7 @@ class LogVisualizer(QMainWindow):
         main_layout.addLayout(controls)
         self.tabs = QTabWidget(); main_layout.addWidget(self.tabs)
         self._build_dashboard_tab()
+        self._build_leaderboard_tab()
         market_container = QWidget(); market_layout = QVBoxLayout(market_container); market_layout.setContentsMargins(0, 0, 0, 0); market_layout.setSpacing(0)
         self.hm_legend = HeatmapLegend(); market_layout.addWidget(self.hm_legend)
         self.gw_m = pg.GraphicsLayoutWidget(); self.gw_m.setBackground(BG); market_layout.addWidget(self.gw_m)
@@ -602,10 +930,10 @@ class LogVisualizer(QMainWindow):
         self.p_m = self.gw_m.addPlot(row=0, col=0); self.p_m.showGrid(x=True, y=True, alpha=0.3); self.p_m.setDownsampling(auto=True, mode='peak')
         self.p_gen = self.gw_m.addPlot(row=1, col=0); self.p_gen.showGrid(x=True, y=True, alpha=0.3); self.p_gen.setFixedHeight(200); self.p_gen.setXLink(self.p_m); self.p_gen.hideAxis('bottom'); self.p_gen.addLegend()
         self.img_item = pg.ImageItem(); self.img_item.setZValue(0); self.img_item.setAutoDownsample(False); self.p_m.addItem(self.img_item)
-        self.img_orders = pg.ImageItem(); self.img_orders.setZValue(1); self.img_orders.setAutoDownsample(False); self.p_m.addItem(self.img_orders); self.img_orders.setVisible(False)
+        self.img_orders = pg.ImageItem(); self.img_orders.setZValue(1); self.img_orders.setAutoDownsample(False); self.p_m.addItem(self.img_orders); self.img_orders.setVisible(True)
         self.curve_mid = self.p_m.plot(pen=pg.mkPen(ACCENT_CYAN, width=2), name="Mid Price", clipToView=True)
         self.sc_bot = pg.ScatterPlotItem(symbol='x', size=7, brush=ACCENT_WHITE, name="Bot Trades"); self.sc_bot.setZValue(2)
-        self.sc_buy = pg.ScatterPlotItem(symbol='t1', size=10, brush=ACCENT_CYAN, name="My Buy"); self.sc_buy.setZValue(3)
+        self.sc_buy = pg.ScatterPlotItem(symbol='t1', size=10, brush=ACCENT_GREEN, name="My Buy"); self.sc_buy.setZValue(3)
         self.sc_sell = pg.ScatterPlotItem(symbol='t', size=10, brush=ACCENT_ORANGE, name="My Sell"); self.sc_sell.setZValue(3)
         for item in [self.sc_bot, self.sc_buy, self.sc_sell]: self.p_m.addItem(item)
         self.leg_m = InteractiveLegendItem(offset=(10, 10)); self.leg_m.setParentItem(self.p_m.graphicsItem())
@@ -731,6 +1059,7 @@ class LogVisualizer(QMainWindow):
                 'day': self.cb_day.currentText(),
                 'dash_product': self.cb_dash_prod.currentText(),
                 'pnl_product': self.cb_pnl_prod.currentText(),
+                'pnl_type': self.cb_pnl_type.currentText(),
                 'tag': self.cb_tag.checkedItems(),
                 'dd_pct': self.chk_dd_pct.isChecked(),
                 'gen_pane_minimized': self._gen_pane_minimized,
@@ -784,12 +1113,12 @@ class LogVisualizer(QMainWindow):
     def _apply_view_state(self):
         vs = self._read_config().get('view_state', {})
         if not vs: return
-        for combo, key in [(self.cb_prod, 'product'), (self.cb_day, 'day'), (self.cb_dash_prod, 'dash_product'), (self.cb_pnl_prod, 'pnl_product')]:
+        for combo, key in [(self.cb_prod, 'product'), (self.cb_day, 'day'), (self.cb_dash_prod, 'dash_product'), (self.cb_pnl_prod, 'pnl_product'), (self.cb_pnl_type, 'pnl_type')]:
             val = vs.get(key, '')
             if val and combo.findText(val) >= 0:
                 combo.blockSignals(True); combo.setCurrentText(val); combo.blockSignals(False)
         saved_tags = vs.get('tag', [])
-        if isinstance(saved_tags, list) and saved_tags:
+        if isinstance(saved_tags, list):
             self.cb_tag.blockSignals(True); self.cb_tag.setCheckedItems(saved_tags); self.cb_tag.blockSignals(False)
         self.chk_dd_pct.blockSignals(True); self.chk_dd_pct.setChecked(vs.get('dd_pct', False)); self.chk_dd_pct.blockSignals(False)
         minimized = vs.get('gen_pane_minimized', False)
@@ -886,10 +1215,43 @@ class LogVisualizer(QMainWindow):
         self._submit_worker.start()
         self._submit_progress.exec()
 
-    def _on_submit_done(self, success, message):
+    def _on_submit_done(self, success, message, zip_path=""):
         self._submit_progress.update_status(message)
         self._submit_progress.mark_done(success)
-        if success: self._load_newest_submission_log()
+        if success:
+            self._last_zip_path = zip_path
+            self._load_newest_submission_log()
+
+    def _on_tracker_clicked(self):
+        cfg = self._read_config()
+        dlg = TrackerDialog(cfg.get('tracker_author', ''), cfg.get('tracker_strat', ''), self)
+        if self._last_zip_path: dlg.zip_input.setText(self._last_zip_path)
+        
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            zip_path = dlg.zip_input.text().strip()
+            author = dlg.author_input.text().strip()
+            strat = dlg.strat_input.text().strip()
+            round_num = int(dlg.round_input.text().strip() or "3")
+            notes = dlg.notes_input.text().strip()
+            
+            if not os.path.isfile(zip_path):
+                QMessageBox.warning(self, "Error", "Invalid zip file path")
+                return
+                
+            cfg['tracker_author'] = author; cfg['tracker_strat'] = strat
+            self._write_config(cfg)
+            
+            self._tracker_progress = SubmitProgressDialog(self)
+            self._tracker_progress.setWindowTitle("GitHub Tracker Upload")
+            self._tracker_worker = TrackerWorker(zip_path, author, strat, notes, round_num)
+            self._tracker_worker.status.connect(self._tracker_progress.update_status)
+            self._tracker_worker.done.connect(self._on_tracker_done)
+            self._tracker_worker.start()
+            self._tracker_progress.exec()
+
+    def _on_tracker_done(self, success, message):
+        self._tracker_progress.update_status(message)
+        self._tracker_progress.mark_done(success)
 
     def _load_newest_submission_log(self):
         logviz_dir = os.path.dirname(os.path.abspath(__file__))
@@ -989,6 +1351,167 @@ class LogVisualizer(QMainWindow):
         self.p_m.addItem(vl); self.p_m.addItem(hl); self.p_m.addItem(txt)
         self.markup_lines.extend([vl, hl, txt])
         print(f"Markup point added: X={x:.0f}, Y={y:.1f}")
+
+    def _build_leaderboard_tab(self):
+        container = QWidget(); layout = QVBoxLayout(container); layout.setContentsMargins(12, 12, 12, 12); layout.setSpacing(8)
+        
+        header = QHBoxLayout()
+        self.btn_refresh_lb = QPushButton("⟳ Refresh Leaderboard"); self.btn_refresh_lb.clicked.connect(self._on_leaderboard_refresh); header.addWidget(self.btn_refresh_lb)
+        btn_upload = QPushButton("🚀 Upload Local Run"); btn_upload.clicked.connect(self._on_tracker_clicked); header.addWidget(btn_upload)
+        header.addSpacing(20)
+        
+        header.addWidget(QLabel("Product:")); self.lb_cb_prod = QComboBox(); self.lb_cb_prod.currentTextChanged.connect(self._apply_lb_filters); header.addWidget(self.lb_cb_prod)
+        header.addWidget(QLabel("Author:")); self.lb_cb_auth = QComboBox(); self.lb_cb_auth.currentTextChanged.connect(self._apply_lb_filters); header.addWidget(self.lb_cb_auth)
+        header.addWidget(QLabel("Round:")); self.lb_cb_round = QComboBox(); self.lb_cb_round.currentTextChanged.connect(self._apply_lb_filters); header.addWidget(self.lb_cb_round)
+        self.lb_chk_hidden = QCheckBox("Show Hidden"); self.lb_chk_hidden.stateChanged.connect(self._apply_lb_filters); header.addWidget(self.lb_chk_hidden)
+        
+        self.lbl_lb_status = QLabel(""); self.lbl_lb_status.setStyleSheet(f"color: {DIM};"); header.addWidget(self.lbl_lb_status)
+        header.addStretch(); layout.addLayout(header)
+
+        cards_layout = QHBoxLayout()
+        self.lb_cards = {}
+        for title in ["TOTAL RUNS", "BEST PnL", "TOP AUTHOR", "BEST SHARPE", "PRODUCTS SEEN"]:
+            f = QFrame(); f.setStyleSheet(f"background: {PANEL_BG}; border: 1px solid {BORDER}; border-radius: 4px;")
+            fl = QVBoxLayout(f); fl.addWidget(QLabel(f"<span style='color:{TEXT};font-size:8pt;'>{title}</span>"))
+            val_lbl = QLabel("—"); val_lbl.setStyleSheet(f"font-size:12pt;font-weight:bold;color:{TEXT};")
+            fl.addWidget(val_lbl); cards_layout.addWidget(f); self.lb_cards[title] = val_lbl
+        layout.addLayout(cards_layout)
+
+        self.lb_gw_chart = pg.GraphicsLayoutWidget(); self.lb_gw_chart.setBackground(BG); self.lb_gw_chart.setFixedHeight(120)
+        self.lb_chart = self.lb_gw_chart.addPlot(); self.lb_chart.hideAxis('left'); self.lb_chart.hideAxis('bottom')
+        self.lb_chart.setMouseEnabled(x=False, y=False); layout.addWidget(self.lb_gw_chart)
+
+        self.lb_table = QTableWidget(); self.lb_table.setColumnCount(10)
+        self.lb_table.setHorizontalHeaderLabels(["Rank", "Score", "Sharpe", "MaxDD", "Author", "Strategy", "Round", "Trades", "Volume", "Time"])
+        self.lb_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.lb_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.lb_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self.lb_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.lb_table.verticalHeader().setVisible(False); self.lb_table.itemDoubleClicked.connect(self._on_lb_row_double_clicked)
+        self.lb_table.horizontalHeader().sectionClicked.connect(self._on_lb_header_clicked)
+        layout.addWidget(self.lb_table)
+
+        self._lb_runs = []
+        self._lb_hidden_ids = set()
+        self._lb_sort_col = 1
+        self._lb_sort_asc = False
+        self.tabs.addTab(container, "Leaderboard")
+
+    def _on_leaderboard_refresh(self):
+        self.btn_refresh_lb.setEnabled(False); self.lbl_lb_status.setText("Fetching...")
+        self._lb_worker = LeaderboardWorker()
+        self._lb_worker.status.connect(self.lbl_lb_status.setText)
+        self._lb_worker.done.connect(self._on_leaderboard_done)
+        self._lb_worker.start()
+
+    def _on_leaderboard_done(self, runs, hidden_ids, error):
+        self.btn_refresh_lb.setEnabled(True); self.lbl_lb_status.setText("")
+        if error: QMessageBox.warning(self, "Leaderboard Error", f"Failed to fetch data: {error}"); return
+        self._lb_runs = runs; self._lb_hidden_ids = hidden_ids
+        
+        prods, authors, rounds = set(), set(), set()
+        for r in runs:
+            prods.update(r.get('metrics', {}).get('products', []))
+            if r.get('author'): authors.add(r['author'])
+            if r.get('round') is not None: rounds.add(str(r['round']))
+            
+        def update_cb(cb, items):
+            curr = cb.currentText(); cb.blockSignals(True); cb.clear()
+            cb.addItems(["All"] + sorted(list(items))); cb.setCurrentText(curr if curr in items else "All"); cb.blockSignals(False)
+            
+        update_cb(self.lb_cb_prod, prods); update_cb(self.lb_cb_auth, authors); update_cb(self.lb_cb_round, rounds)
+        self._apply_lb_filters()
+
+    def _on_lb_header_clicked(self, logicalIndex):
+        if self._lb_sort_col == logicalIndex: self._lb_sort_asc = not self._lb_sort_asc
+        else: self._lb_sort_col = logicalIndex; self._lb_sort_asc = logicalIndex in [0, 3]
+        self._apply_lb_filters()
+
+    def _apply_lb_filters(self, *args):
+        if not hasattr(self, '_lb_runs') or not self._lb_runs: return
+        p_filter, a_filter, r_filter = self.lb_cb_prod.currentText(), self.lb_cb_auth.currentText(), self.lb_cb_round.currentText()
+        show_hidden = self.lb_chk_hidden.isChecked()
+        
+        filtered = []
+        for r in self._lb_runs:
+            if not show_hidden and r.get('run_id') in self._lb_hidden_ids: continue
+            if p_filter != "All" and p_filter not in r.get('metrics', {}).get('products', []): continue
+            if a_filter != "All" and r.get('author') != a_filter: continue
+            if r_filter != "All" and str(r.get('round', '')) != r_filter: continue
+            filtered.append(r)
+            
+        pnls = [r.get('metrics', {}).get('total_profit', r.get('metrics', {}).get('total_pnl', 0)) for r in filtered]
+        self.lb_cards["TOTAL RUNS"].setText(str(len(filtered))); self.lb_cards["TOTAL RUNS"].setStyleSheet(f"color: {ACCENT_CYAN}; font-size:12pt;font-weight:bold;")
+        
+        if filtered:
+            best_pnl = max(pnls)
+            self.lb_cards["BEST PnL"].setText(f"{best_pnl:,.0f}"); self.lb_cards["BEST PnL"].setStyleSheet(f"color: {ACCENT_GREEN if best_pnl >= 0 else ACCENT_RED}; font-size:12pt;font-weight:bold;")
+            best_sh = max([r.get('metrics', {}).get('sharpe', 0) for r in filtered])
+            self.lb_cards["BEST SHARPE"].setText(f"{best_sh:.3f}"); self.lb_cards["BEST SHARPE"].setStyleSheet(f"color: {ACCENT_PURPLE}; font-size:12pt;font-weight:bold;")
+            author_pnls = {}
+            for r in filtered: a = r.get('author', '—'); author_pnls[a] = author_pnls.get(a, 0) + r.get('metrics', {}).get('total_profit', r.get('metrics', {}).get('total_pnl', 0))
+            top_a = max(author_pnls, key=author_pnls.get) if author_pnls else "—"
+            self.lb_cards["TOP AUTHOR"].setText(top_a); self.lb_cards["TOP AUTHOR"].setStyleSheet(f"color: {ACCENT_GOLD}; font-size:12pt;font-weight:bold;")
+            all_p = set()
+            for r in filtered: all_p.update(r.get('metrics', {}).get('products', []))
+            self.lb_cards["PRODUCTS SEEN"].setText(str(len(all_p))); self.lb_cards["PRODUCTS SEEN"].setStyleSheet(f"color: {ACCENT_CYAN}; font-size:12pt;font-weight:bold;")
+        else:
+            for k in ["BEST PnL", "TOP AUTHOR", "BEST SHARPE", "PRODUCTS SEEN"]:
+                self.lb_cards[k].setText("—"); self.lb_cards[k].setStyleSheet(f"color: {TEXT}; font-size:12pt;font-weight:bold;")
+
+        self.lb_chart.clear()
+        if filtered:
+            x, y = np.arange(len(filtered)), np.array(pnls)
+            brushes = [pg.mkBrush(ACCENT_GREEN if v >= 0 else ACCENT_RED) for v in y]
+            bg = pg.BarGraphItem(x=x, height=y, width=0.8, brushes=brushes); self.lb_chart.addItem(bg); self.lb_chart.autoRange()
+
+        def get_val(r):
+            m, c = r.get('metrics', {}), self._lb_sort_col
+            if c == 1: return m.get('total_profit', m.get('total_pnl', 0))
+            if c == 2: return m.get('sharpe', 0)
+            if c == 3: return m.get('max_drawdown_pct', 0)
+            if c == 4: return str(r.get('author', ''))
+            if c == 5: return str(r.get('strategy_name', ''))
+            if c == 6: return int(r.get('round', 0)) if str(r.get('round', 0)).isdigit() else 0
+            if c == 7: return m.get('submission_trades', 0)
+            if c == 8: return m.get('submission_volume', 0)
+            if c == 9: return str(r.get('uploaded_at', ''))
+            return m.get('total_profit', m.get('total_pnl', 0))
+            
+        filtered.sort(key=get_val, reverse=not self._lb_sort_asc)
+        self._lb_filtered_runs = filtered
+        
+        self.lb_table.setRowCount(len(filtered))
+        for i, run in enumerate(filtered):
+            m, is_hid = run.get('metrics', {}), run.get('run_id') in self._lb_hidden_ids
+            pnl = m.get('total_profit', m.get('total_pnl', 0))
+            rank_str = f"∅{i+1}" if is_hid else ("🥇" if i==0 else "🥈" if i==1 else "🥉" if i==2 else f"#{i+1}") if self._lb_sort_col in [0,1] and not self._lb_sort_asc else f"#{i+1}"
+            items = [rank_str, f"{pnl:,.0f}", f"{m.get('sharpe', 0):.3f}", f"{m.get('max_drawdown_pct', 0):.2f}%", run.get('author', '??'), run.get('strategy_name', '??'), str(run.get('round', '—')), f"{m.get('submission_trades', 0):,}", f"{m.get('submission_volume', 0):,}", run.get('uploaded_at', '??').split('T')[0]]
+            for col, txt in enumerate(items):
+                it = QTableWidgetItem(txt)
+                color = DIM if is_hid else (ACCENT_GOLD if i==0 and col==0 else ACCENT_GREEN if col==1 and pnl>=0 else ACCENT_RED if col==1 and pnl<0 else ACCENT_CYAN if col==2 else ACCENT_RED if col==3 and m.get('max_drawdown_pct', 0)>10 else ACCENT_ORANGE if col==3 else TEXT)
+                it.setForeground(QBrush(QColor(color))); self.lb_table.setItem(i, col, it)
+        self.lb_table.resizeRowsToContents()
+
+    def _on_lb_row_double_clicked(self, item):
+        row = item.row()
+        if hasattr(self, '_lb_filtered_runs') and 0 <= row < len(self._lb_filtered_runs):
+            run = self._lb_filtered_runs[row]
+            is_hid = run.get('run_id') in self._lb_hidden_ids
+            dlg = RunDetailsDialog(run, is_hid, self)
+            dlg.btn_hide.clicked.connect(lambda: self._toggle_hide_run(run.get('run_id'), dlg))
+            dlg.exec()
+
+    def _toggle_hide_run(self, run_id, dlg):
+        if run_id in self._lb_hidden_ids: self._lb_hidden_ids.remove(run_id)
+        else: self._lb_hidden_ids.add(run_id)
+        dlg.btn_hide.setEnabled(False); dlg.btn_hide.setText("Updating...")
+        self._hide_worker = HideRunWorker(self._lb_hidden_ids)
+        self._hide_worker.done.connect(lambda s, m: self._on_hide_done(s, m, dlg))
+        self._hide_worker.start()
+
+    def _on_hide_done(self, success, msg, dlg):
+        if success: self._apply_lb_filters(); dlg.accept()
+        else: QMessageBox.warning(self, "Error", f"Failed to update hidden state: {msg}"); dlg.btn_hide.setEnabled(True); dlg.btn_hide.setText("Retry")
 
     def _build_dashboard_tab(self):
         dash_container = QWidget()
@@ -1142,7 +1665,7 @@ class LogVisualizer(QMainWindow):
                 is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
                 is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
                 qty = tr.get('quantity', 0); pr = tr.get('price', 0)
-                if is_b: row_line('MY BUY ', f'{pr} &times; {qty}', ACCENT_CYAN)
+                if is_b: row_line('MY BUY ', f'{pr} &times; {qty}', ACCENT_GREEN)
                 elif is_s: row_line('MY SELL', f'{pr} &times; {qty}', ACCENT_ORANGE)
                 else: row_line('BOT    ', f'{pr} &times; {qty}', DIM)
             lines.append('')
@@ -1226,11 +1749,13 @@ class LogVisualizer(QMainWindow):
         self.cb_pnl_prod.blockSignals(True); self.cb_pnl_prod.clear(); self.cb_pnl_prod.addItems(['Overall'] + products); self.cb_pnl_prod.blockSignals(False)
         self.cb_tag.blockSignals(True); self.cb_tag.clear(); self.cb_tag.addItems(['Untagged']); self.cb_tag.blockSignals(False)
         self._apply_saved_settings()
+        self.setWindowTitle("Prosperity Sandbox Visualizer [CSV Data]")
         self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._process_selection()
         self._apply_custom_curve_visibility(); self._update_dashboard()
 
     def _load_file(self, path):
         self._current_log_path = path
+        self.setWindowTitle(f"Prosperity Sandbox Visualizer [{os.path.basename(path)}]")
         with open(path, encoding='utf-8') as f: raw = json.load(f)
         csv_str = raw.get('activitiesLog', '').replace('\\n', '\n')
         df = pl.read_csv(StringIO(csv_str), separator=';', null_values=['', 'nan'])
@@ -1277,7 +1802,6 @@ class LogVisualizer(QMainWindow):
         self.data_settings = {}
         self._apply_saved_settings()
         self.btn_backtest.setVisible(self._is_backtest_log(path))
-        self.btn_submit.setVisible(self._is_submission_log(path))
         self._build_custom_plots(); self._build_position_plot(); self._build_logs_table(); self._update_sandbox_table(); self._process_selection()
         self._apply_custom_curve_visibility(); self._update_dashboard()
 
@@ -1415,6 +1939,7 @@ class LogVisualizer(QMainWindow):
             return
         self._build_position_plot()
         self._process_selection()
+        self._save_window_state()
 
     def _compute_pnl(self, pnl_prod, day, pnl_type, cont_ts, min_day, tags=None):
         df = self.data['prices_df']
@@ -1629,6 +2154,7 @@ class LogVisualizer(QMainWindow):
 
         self.p_gen.setVisible(has_generic_data and not self._gen_pane_minimized)
         self.p_m.autoRange(); self.p_pnl.autoRange()
+        self._save_window_state()
 
     def _update_dashboard(self):
         if not self.data: return

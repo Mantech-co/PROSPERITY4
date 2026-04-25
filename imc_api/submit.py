@@ -19,7 +19,7 @@ from pathlib import Path
 
 AUTH_FILE = Path(__file__).parent / ".auth.json"
 API_BASE = "https://3dzqiahkw1.execute-api.eu-west-1.amazonaws.com/prod"
-POLL_INTERVAL = 30
+POLL_INTERVAL = 10
 LOGIN_URL = "https://prosperity.imc.com/login"
 COGNITO_CLIENT_ID = "5kgp0jm69aeb91paqj1hnps838"
 COGNITO_ENDPOINT = "https://cognito-idp.eu-west-1.amazonaws.com/"
