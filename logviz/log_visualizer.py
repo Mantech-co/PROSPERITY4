@@ -1103,7 +1103,10 @@ class LogVisualizer(QMainWindow):
         # OB heatmap volume at cursor
         if self.ob_res:
             y_levels = self.ob_res['levels']
-            y_idx = int(np.clip(np.searchsorted(y_levels, y), 0, len(y_levels) - 1))
+            y_idx = np.searchsorted(y_levels, y)
+            if y_idx > 0 and (y_idx == len(y_levels) or abs(y - y_levels[y_idx-1]) < abs(y - y_levels[y_idx])):
+                y_idx -= 1
+            y_idx = int(np.clip(y_idx, 0, len(y_levels) - 1))
             vol = self.ob_res['raw_vol'][y_idx, idx]
             if vol > 0:
                 sec('OB HEATMAP')
@@ -1152,7 +1155,10 @@ class LogVisualizer(QMainWindow):
                 if not pts: continue
                 ts_arr = self._custom_ts_arrays.get(name)
                 if ts_arr is None: continue
-                ci = int(np.clip(np.searchsorted(ts_arr, x), 0, len(ts_arr) - 1))
+                ci = np.searchsorted(ts_arr, x)
+                if ci > 0 and (ci == len(ts_arr) or abs(x - ts_arr[ci-1]) < abs(x - ts_arr[ci])):
+                    ci -= 1
+                ci = int(np.clip(ci, 0, len(ts_arr) - 1))
                 val = pts[ci][1]
                 color = CUSTOM_COLORS[i % len(CUSTOM_COLORS)]
                 row_line(name, f': {val:.5g}', color)

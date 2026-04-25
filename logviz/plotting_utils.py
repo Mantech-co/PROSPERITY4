@@ -170,7 +170,7 @@ def get_rect(times, levels):
         
     y_min = levels[0]
     if len(levels) > 1:
-        y_step = (levels[1] - levels[0]) / (len(levels) - 1)
+        y_step = (levels[-1] - levels[0]) / (len(levels) - 1)
     else:
         y_step = 1.0
         
