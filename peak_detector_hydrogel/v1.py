@@ -22,8 +22,8 @@ class Trader:
     SMA_WINDOW_SIZE = 300
     QUALITY_WINDOW = 20
 
-    OUTLIER_DELTA_THRESH = 25
-    OUTLIER_DELTA_MAX = 50
+    OUTLIER_DELTA_THRESH = 20
+    OUTLIER_DELTA_MAX = 30
     # =========================================================================
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
