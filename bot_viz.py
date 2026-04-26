@@ -512,10 +512,11 @@ class LogVisualizer(QMainWindow):
         controls.addWidget(QLabel("Product:")); self.cb_prod = QComboBox(); controls.addWidget(self.cb_prod)
         controls.addWidget(QLabel("Day:")); self.cb_day = QComboBox(); controls.addWidget(self.cb_day)
         controls.addWidget(QLabel("Volumes:")); self.cb_vol = CheckableComboBox(); controls.addWidget(self.cb_vol)
+        self.btn_apply_vol = QPushButton("Apply"); controls.addWidget(self.btn_apply_vol)
         
         self.cb_prod.currentTextChanged.connect(self._handle_product_or_day_change)
         self.cb_day.currentTextChanged.connect(self._handle_product_or_day_change)
-        self.cb_vol.selectionChanged.connect(self._render_plot)
+        self.btn_apply_vol.clicked.connect(self._render_plot)
         
         controls.addStretch()
         btn_setup = QPushButton("⚙️ Data Setup [S]"); btn_setup.clicked.connect(self._open_data_setup); controls.addWidget(btn_setup)
