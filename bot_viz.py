@@ -21,6 +21,15 @@ ACCENT_CYAN, ACCENT_GREEN, ACCENT_RED, ACCENT_GOLD, ACCENT_WHITE, ACCENT_PURPLE,
     '#00d4ff', '#39ff6e', '#ff3d5a', '#ffd700', '#ffffff', '#b06dff', '#ff9f43'
 CUSTOM_COLORS = ['#ff6b6b', '#ffd166', '#06d6a0', '#118ab2', '#ef476f', '#b06dff', '#ff9f43']
 
+FIXED_BOT_COLORS = {
+    'Mark 01': '#ff0000',
+    'Mark 14': '#00ff00',
+    'Mark 22': '#ff00ff',
+    'Mark 38': '#ffff00',
+    'Mark 49': '#ff8800',
+    'Mark 55': '#8800ff',
+    'Mark 67': '#ffffff',
+}
 BUY_VOLUME_COLORS = [
     [0, 100, 100], [0, 130, 130], [0, 160, 160], [0, 190, 190], [0, 220, 220],
     [0, 255, 255], [100, 255, 255], [150, 255, 255], [200, 255, 255], [255, 255, 255]
@@ -1303,7 +1312,10 @@ class LogVisualizer(QMainWindow):
 
         unique_bots = sorted(list(set(list(bot_buys.keys()) + list(bot_sells.keys()))))
         for i, bot in enumerate(unique_bots):
-            color = pg.intColor(i, hues=max(1, len(unique_bots)), values=1, alpha=255)
+            if bot in FIXED_BOT_COLORS:
+                color = pg.mkColor(FIXED_BOT_COLORS[bot])
+            else:
+                color = pg.intColor(i, hues=max(1, len(unique_bots)), values=1, alpha=255)
             self.bot_colors[bot] = color.name()
             
             if bot in bot_buys and bot_buys[bot]['t']:
