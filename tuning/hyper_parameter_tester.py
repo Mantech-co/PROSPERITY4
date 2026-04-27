@@ -32,12 +32,12 @@ BACKTEST_OUTPUT_DIR = PROJECT_ROOT / "backtests" / "tuning_runs"
 
 # ── Parameter Grid ────────────────────────────────────────────────────────────
 PARAM_GRID = {
-    "z_threshold": [round(v * 0.25, 2) for v in range(2, 21)],  # 0.5 .. 5.0
+    "long_threshold":  list(range(10, 21)),   # 10..20 step 1
+    "short_threshold": list(range(10, 21)),   # 10..20 step 1
 }
 
 # Fixed params (not swept, but always written)
 FIXED_PARAMS = {
-    "z_window": 20,
     "position_limit": 200,
 }
 

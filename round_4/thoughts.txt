@@ -1,0 +1,131 @@
+time stamp, inter arrival time, bot vs bot, bot vs market order, volume, spread from mid price, portfolio, position, volatility, profit, percentage change profit, profit in product, correlation between bots
+
+filter noise
+
+see traders who don't trade against each other and maybe group them as one and analyse again
+
+clarity required:
+why is m22 trading random options?
+graph 79 iv vs m38
+
+filters for data analysis:
+see when bot crosses mid price
+filter m22 show only orderbook interactions of m22 (only on atm and otm options)
+see when unusual spread occurs for all traders
+low volume outliers
+m22 buy orders
+15 volume trades
+
+
+
+
+general insights:
+- m22 might be sitting to place outliers (all outliers inside spread are by 22)
+- m38, m49, m55, m67 have a general trend of where wrt mid price they trade but some times they spike and go to the over side of the mid price and do something, probably when they have a signal
+- m38, m55 have directional information of market
+- m22, m49, m67 are probably have time-based information of the market
+
+
+General insights:
+- one bot is putting L1 spread (M14)
+- one bot is putting L2 spread (M01)
+
+- IAT of all bots together have gap at certain IATs.
+
+hydrogel pack order volume:
+- only m14, m22, m38 are trading
+- m14 only trades with m38 ( large volume )
+- m22 only trades with m38 ( small volume )
+
+underlying order volume:
+- m1 and m14 form orderbook (need to confirm)
+- m38 doesn't trade
+- only m55 is taking from orderbook
+- m67 is only buying (high volume) [sold from m22 and m49 except 1 volume from m55]
+- only 1 trade where m55 sells to m67
+- m49 shorting lot to m67 (trades casually with m55 and m22)
+- m22 shorting lot to m67 (trades casually with m55 and m49)
+
+# maybe 55 is good signal (takes a lot from OB and also does trading with bots)
+
+VEV_4000:
+only m22, m14, m38 are trading like hydrogel
+- m14 only trades with m38 ( large volume )
+- m22 only trades with m38 ( small volume )
+
+VEV_4500, VEV500, VEV_5100:
+only 3 trades - m22 and m38 are trading 
+# m22 (might be market maker) is here to fulfil
+- when 22 and 38 are trading, 22 is placing outliers and 38 sees that and takes (not all outliers)
+
+VEV_5200 (ATM):
+- m22 and m38 are trading as previous options
+- m22 is also selling from orderbook (m14 and m1 [both volumes comparable but m14>m1])
+
+VEV_5300:
+- for the first time, m22 is selling only 1ce, buying 3ce from m38
+- m22 is selling from orderbook (m14 and m1[slightly comparable but m1>m14])
+
+VEV_5400:
+- m22 is selling from order book [m1>>m14]
+- nothing else happening
+
+VEV_5500
+- m22 is selling from order book [m1>>m14]
+- nothing else happening
+
+VEV_6000, VEV_6500:
+- m22 only selling from order book only to m1
+
+
+trader insights:
+M38
+- is mostly trade in hydrogel
+- next highest trade volume is in VEV_4000 (deepest itm option)
+- net position is near 0
+
+M55:
+- position near 0, only trades underlying
+
+M22:
+- mostly shorting, naked shorting
+
+from trader_activity:
+- m38 has peaks probably he is getting signals
+- m67 and m49 have a slow increase in activity, probably they are waiting to calculate some rolling window thing and trading based on that.
+
+
+Product specific:
+Underlying -
+m67 is building position by buying continuously
+m22 and m49 are selling continuously
+m55 is trying to keep position near 0 maybe random
+
+VEV_5200:
+m22 sees some sort of signal and immediately starts adjusting position by taking from orderbook
+m38 does very few trades and has position near 0
+
+VEV_5300:
+m22 shorting as usual, no sharp change in position
+m38 does very few trades and has position near 0
+
+VEV_5400, VEV_5500, VEV_6000, VEV_6500:
+m22 is selling from order book, nothing else happening
+
+trader-pair information:
+m38, m49, m67, - never trade with m1 [order book]
+m49, m67 - never trade with 
+m38 only trades from orderbook or with m22
+m22 - trades with anyone and orderbook
+
+
+
+profit n loss analysis:
+- m55 makes consistent loss, try doing opposite maybe?
+- m38 is doing some crazy things
+- m55 for velvet fruit also
+- m49 has signal, his delta pnl per traade event has a spike
+- mark 67 also has a negative spike in delta pnl per trade
+
+
+- m38 has signal maybe, decreases spread when it has, goes in more agressively

@@ -84,6 +84,26 @@ QSplitter::handle {{ background: {BORDER}; width: 2px; }}
 """
 
 
+def bs_greeks(S, K, r, sigma, T, opt_type):
+    if T <= 0 or sigma <= 0 or S <= 0:
+        delta = 1.0 if (opt_type == 'call' and S > K) else (-1.0 if (opt_type == 'put' and S < K) else 0.0)
+        return {'delta': delta, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0, 'rho': 0.0}
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    pdf_d1 = norm.pdf(d1)
+    gamma = pdf_d1 / (S * sigma * np.sqrt(T))
+    vega  = S * pdf_d1 * np.sqrt(T)
+    if opt_type == 'call':
+        delta = norm.cdf(d1)
+        theta = (-S * pdf_d1 * sigma / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
+        rho   = K * T * np.exp(-r * T) * norm.cdf(d2)
+    else:
+        delta = norm.cdf(d1) - 1
+        theta = (-S * pdf_d1 * sigma / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
+        rho   = -K * T * np.exp(-r * T) * norm.cdf(-d2)
+    return {'delta': delta, 'gamma': gamma, 'theta': theta, 'vega': vega, 'rho': rho}
+
+
 def bs_price(S, K, r, sigma, T, opt_type):
     if T <= 0:
         return max(S - K, 0.0) if opt_type == 'call' else max(K - S, 0.0)
@@ -202,8 +222,8 @@ class OptionsVisualizer(QMainWindow):
 
         lv.addWidget(_section("BASKET"))
         self.tbl = QTableWidget()
-        self.tbl.setColumnCount(6)
-        self.tbl.setHorizontalHeaderLabels(["Dir", "Type", "K", "Qty", "IV", "Price"])
+        self.tbl.setColumnCount(11)
+        self.tbl.setHorizontalHeaderLabels(["Dir", "Type", "K", "Qty", "IV", "Price", "Δ Delta", "Γ Gamma", "Θ Theta", "ν Vega", "ρ Rho"])
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -379,8 +399,23 @@ class OptionsVisualizer(QMainWindow):
             color = ACCENT_CYAN if opt['type'] == 'call' else ACCENT_ORANGE
             dir_str = "BUY" if opt['qty'] >= 0 else "SELL"
             dir_color = ACCENT_GREEN if opt['qty'] >= 0 else ACCENT_RED
+            q = opt['qty']
             price = bs_price(S, opt['K'], r, opt['iv'], T, opt['type'])
-            for col, val in enumerate([dir_str, opt['type'].upper(), f"{opt['K']:.2f}", str(abs(opt['qty'])), f"{opt['iv']:.4f}", f"{price:.4f}"]):
+            g = bs_greeks(S, opt['K'], r, opt['iv'], T, opt['type'])
+            vals = [
+                dir_str,
+                opt['type'].upper(),
+                f"{opt['K']:.2f}",
+                str(abs(q)),
+                f"{opt['iv']:.4f}",
+                f"{price:.4f}",
+                f"{q * g['delta']:+.4f}",
+                f"{q * g['gamma']:+.4f}",
+                f"{q * g['theta']:+.4f}",
+                f"{q * g['vega']:+.4f}",
+                f"{q * g['rho']:+.4f}",
+            ]
+            for col, val in enumerate(vals):
                 item = QTableWidgetItem(val)
                 item.setForeground(QBrush(QColor(dir_color if col == 0 else color)))
                 self.tbl.setItem(i, col, item)
@@ -454,14 +489,23 @@ class OptionsVisualizer(QMainWindow):
 
         bs_at_S    = float(np.interp(S, S_arr, bs_total))
         cost_label = "Debit" if cost_basis > 0 else "Credit"
+
+        net_delta = sum(o['qty'] * bs_greeks(S, o['K'], r, o['iv'], T, o['type'])['delta'] for o in self.basket)
+        net_gamma = sum(o['qty'] * bs_greeks(S, o['K'], r, o['iv'], T, o['type'])['gamma'] for o in self.basket)
+        net_theta = sum(o['qty'] * bs_greeks(S, o['K'], r, o['iv'], T, o['type'])['theta'] for o in self.basket)
+        net_vega  = sum(o['qty'] * bs_greeks(S, o['K'], r, o['iv'], T, o['type'])['vega']  for o in self.basket)
+
         self.data_strip.setText(
             f"  {cost_label}: {abs(cost_basis):.4f}"
-            f"  |  BS Value @S: {bs_at_S:.4f}"
             f"  |  BS P&L @S: {bs_at_S - cost_basis:+.4f}"
             f"  |  Max Profit: {np.max(expiry_pnl):.4f}"
             f"  |  Max Loss: {np.min(expiry_pnl):.4f}"
-            f"  |  Breakevens: {be_str}"
+            f"  |  BE: {be_str}"
             f"  |  Legs: {len(self.basket)}"
+            f"  |  Δ: {net_delta:+.4f}"
+            f"  |  Γ: {net_gamma:+.4f}"
+            f"  |  Θ/day: {net_theta:+.4f}"
+            f"  |  ν: {net_vega:+.4f}"
         )
         self._refresh_table()
 

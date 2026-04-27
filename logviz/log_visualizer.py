@@ -322,6 +322,37 @@ class DataSetupDialog(QDialog):
             out[k] = "main" if cid == 0 else ("generic" if cid == 1 else "disabled")
         return out
 
+class TradeFilterDialog(QDialog):
+    def __init__(self, traders_info, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Trade Filters")
+        self.setMinimumWidth(420)
+        self.settings = settings
+        layout = QVBoxLayout(self)
+        scroll = QScrollArea(); scroll_content = QWidget(); self.grid = QGridLayout(scroll_content)
+        self.grid.setColumnStretch(0, 1)
+        self.grid.addWidget(QLabel("<b>Trader</b>"), 0, 0)
+        self.grid.addWidget(QLabel("<b>ID</b>"), 0, 1)
+        self.grid.addWidget(QLabel("<b>Buy</b>"), 0, 2)
+        self.grid.addWidget(QLabel("<b>Sell</b>"), 0, 3)
+        self.checkboxes = {}
+        for i, (name, tid) in enumerate(sorted(traders_info)):
+            self.grid.addWidget(QLabel(name), i+1, 0)
+            self.grid.addWidget(QLabel(str(tid)), i+1, 1)
+            cb_buy = QCheckBox(); cb_sell = QCheckBox()
+            s = self.settings.get(name, {'buy': True, 'sell': True})
+            cb_buy.setChecked(s.get('buy', True)); cb_sell.setChecked(s.get('sell', True))
+            self.grid.addWidget(cb_buy, i+1, 2, Qt.AlignmentFlag.AlignCenter)
+            self.grid.addWidget(cb_sell, i+1, 3, Qt.AlignmentFlag.AlignCenter)
+            self.checkboxes[name] = (cb_buy, cb_sell)
+        scroll.setWidget(scroll_content); scroll.setWidgetResizable(True); layout.addWidget(scroll)
+        btn = QPushButton("Apply"); btn.clicked.connect(self.accept); layout.addWidget(btn)
+    def get_results(self):
+        out = {}
+        for name, (cb_buy, cb_sell) in self.checkboxes.items():
+            out[name] = {'buy': cb_buy.isChecked(), 'sell': cb_sell.isChecked()}
+        return out
+
 class CheckableComboBox(QComboBox):
     checkedItemsChanged = pyqtSignal()
 
@@ -866,6 +897,7 @@ class LogVisualizer(QMainWindow):
         self._last_zip_path = None
         self._gen_pane_minimized = False
         self._backtest_runner = None
+        self.trade_filters = {}
         # Disable OpenGL by default on Linux as it often causes rendering artifacts (gaps/missing pixels) in ImageItem
         use_gl = sys.platform != 'linux' 
         pg.setConfigOptions(useOpenGL=use_gl, imageAxisOrder='row-major')
@@ -888,6 +920,7 @@ class LogVisualizer(QMainWindow):
         self.cb_prod.currentTextChanged.connect(self._process_selection); self.cb_day.currentTextChanged.connect(self._process_selection)
         self.cb_tag.checkedItemsChanged.connect(self._on_tag_changed)
         controls.addStretch()
+        btn_trades = QPushButton("🕵️ Trade Filter"); btn_trades.clicked.connect(self._open_trade_filters); controls.addWidget(btn_trades)
         btn_setup = QPushButton("⚙️ Data Setup [S]"); btn_setup.clicked.connect(self._open_data_setup); controls.addWidget(btn_setup)
         self.lbl_markup = QLabel("MARKUP: OFF"); self.lbl_markup.setStyleSheet(f"color: {DIM}; font-weight: bold;"); controls.addWidget(self.lbl_markup)
         self.lbl_tooltip = QLabel("TOOLTIP: OFF"); self.lbl_tooltip.setStyleSheet(f"color: {DIM}; font-weight: bold;"); controls.addWidget(self.lbl_tooltip)
@@ -1007,6 +1040,36 @@ class LogVisualizer(QMainWindow):
                 except: pass
             self.custom_curves = {}
             self._process_selection()
+
+    def _open_trade_filters(self):
+        if not self.data: return
+        traders_map = {}
+        for tr in self.data.get('trades', []):
+            b, s = tr.get('buyer'), tr.get('seller')
+            if b: traders_map[b] = tr.get('buyer_id', tr.get('id', ''))
+            if s: traders_map[s] = tr.get('seller_id', tr.get('id', ''))
+        
+        traders_info = list(traders_map.items())
+        dlg = TradeFilterDialog(traders_info, self.trade_filters, self)
+        if dlg.exec():
+            self.trade_filters = dlg.get_results()
+            self._save_trade_filters()
+            self._process_selection()
+
+    def _save_trade_filters(self):
+        cfg = self._read_config()
+        cfg['trade_filters'] = self.trade_filters
+        self._write_config(cfg)
+
+    def _load_trade_filters(self):
+        return self._read_config().get('trade_filters', {})
+
+    def _trade_matches_filter(self, tr):
+        if not self.trade_filters: return True
+        b, s = tr.get('buyer'), tr.get('seller')
+        if b in self.trade_filters and not self.trade_filters[b].get('buy', True): return False
+        if s in self.trade_filters and not self.trade_filters[s].get('sell', True): return False
+        return True
 
     def _settings_path(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), '.logviz_settings.json')
@@ -1147,6 +1210,7 @@ class LogVisualizer(QMainWindow):
             for k, v in saved.items():
                 if k in current_keys:
                     self.data_settings[k] = v
+        self.trade_filters = self._load_trade_filters()
         self._apply_view_state()
 
     def _toggle_gen_pane(self):
@@ -1842,6 +1906,7 @@ class LogVisualizer(QMainWindow):
         pos_by_sym = {}; cont_ts = self.data.get('_continuous_ts', False); min_day = self.data.get('_min_day', 0)
         for tr in trades:
             if not self._trade_matches_tag(tr, tags): continue
+            if not self._trade_matches_filter(tr): continue
             is_b = str(tr.get('buyer','')).upper()=='SUBMISSION'; is_s = str(tr.get('seller','')).upper()=='SUBMISSION'
             if not is_b and not is_s: continue
             sym, qty, ts = tr.get('symbol',''), tr.get('quantity',0), tr.get('timestamp',0)
@@ -1861,6 +1926,7 @@ class LogVisualizer(QMainWindow):
             if tr.get('symbol') != prod: continue
             if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
             if not self._trade_matches_tag(tr, tags): continue
+            if not self._trade_matches_filter(tr): continue
             is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
             is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
             if not is_b and not is_s: continue
@@ -1916,6 +1982,7 @@ class LogVisualizer(QMainWindow):
             if tr.get('symbol') != prod: continue
             if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
             if not self._trade_matches_tag(tr, tags): continue
+            if not self._trade_matches_filter(tr): continue
             is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
             is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
             if not is_b and not is_s: continue
@@ -1974,6 +2041,7 @@ class LogVisualizer(QMainWindow):
                         if tr.get('symbol') != ap: continue
                         if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
                         if not self._trade_matches_tag(tr, tags): continue
+                        if not self._trade_matches_filter(tr): continue
                         tr_ts = tr.get('timestamp', 0)
                         if day == 'All' and 'day' in tr and not cont_ts: tr_ts += (tr['day'] - min_day) * 1000000
                         is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
@@ -2012,6 +2080,7 @@ class LogVisualizer(QMainWindow):
                 if tr.get('symbol') != pnl_prod: continue
                 if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
                 if not self._trade_matches_tag(tr, tags): continue
+                if not self._trade_matches_filter(tr): continue
                 tr_ts = tr.get('timestamp', 0)
                 if day == 'All' and 'day' in tr and not cont_ts: tr_ts += (tr['day'] - min_day) * 1000000
                 is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
@@ -2056,6 +2125,7 @@ class LogVisualizer(QMainWindow):
         for tr in self.data['trades']:
             if tr.get('symbol') != prod: continue
             if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
+            if not self._trade_matches_filter(tr): continue
             ts = tr.get('timestamp', 0)
             if day == 'All' and 'day' in tr and not cont_ts: ts += (tr['day'] - min_day) * 1000000
             is_b = str(tr.get('buyer','')).upper()=='SUBMISSION'; is_s = str(tr.get('seller','')).upper()=='SUBMISSION'

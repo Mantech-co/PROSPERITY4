@@ -1,12 +1,9 @@
 {
-    "z_threshold": 2.0,
-    "z_window": 200,
-    "mm_limit": 40,
-    "vol_threshold": 20,
-    "price_threshold": 3.0,
-    "position_limit": 200,
-    "iv_window": 100,
-    "iv_diff_threshold": 0.002,
-    "delta_threshold": 5.0,
-    "option_limit": 300
+    "option_limit": 300,
+    "underlying_limit": 200,
+    "sigma": 0.20,
+    "r": 0.0,
+    "total_expiry_days": 8,
+    "start_day": 2,
+    "rebalance_ticks": 100
 }

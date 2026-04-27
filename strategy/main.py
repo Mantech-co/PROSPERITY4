@@ -1,280 +1,199 @@
 import json
 import math
-from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional
 from datamodel import OrderDepth, TradingState, Order
 
-# ── Black-Scholes helpers ─────────────────────────────────────────────────────
-_TS_SPAN = 1_000_000
-_TDAY    = 252
+UNDERLYING = "VELVETFRUIT_EXTRACT"
+STRIKES: Dict[str, int] = {
+    "VEV_4000": 4000,
+    "VEV_4500": 4500,
+    "VEV_5000": 5000,
+    "VEV_5100": 5100,
+    "VEV_5200": 5200,
+    "VEV_5300": 5300,
+    "VEV_5400": 5400,
+    "VEV_5500": 5500,
+    "VEV_6000": 6000,
+    "VEV_6500": 6500,
+}
+
+SHORT_SYMS = ["VEV_5200", "VEV_5300"]   # sell to -limit
+LONG_SYMS  = ["VEV_5400", "VEV_5500"]   # buy to +limit (delta offset)
+
+_DEFAULTS = {
+    "option_limit":     300,
+    "underlying_limit": 200,
+    "sigma":            0.20,
+    "r":                0.0,
+    "total_expiry_days": 8,
+    "start_day":        2,
+    "rebalance_ticks":  100,
+}
+
+TS_PER_DAY = 1_000_000
 
 
-def _ncdf(x: float) -> float:
-    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+def _load_params() -> dict:
+    import os
+    path = os.path.join(os.path.dirname(__file__), "params.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return {**_DEFAULTS, **data}
+    except Exception:
+        return dict(_DEFAULTS)
 
 
-def _bs_call(S: float, K: float, T: float, sigma: float) -> float:
-    if T <= 0 or sigma <= 0:
-        return max(S - K, 0.0)
-    sq = math.sqrt(T)
-    d1 = (math.log(S / K) + 0.5 * sigma * sigma * T) / (sigma * sq)
-    return S * _ncdf(d1) - K * _ncdf(d1 - sigma * sq)
+TUNING_PARAMS = _load_params()
 
 
-def _bs_delta(S: float, K: float, T: float, sigma: float) -> float:
-    if T <= 0:
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def bs_delta(S: float, K: float, r: float, sigma: float, T: float) -> float:
+    if T <= 0 or sigma <= 0 or S <= 0:
         return 1.0 if S > K else 0.0
-    d1 = (math.log(S / K) + 0.5 * sigma * sigma * T) / (sigma * math.sqrt(T))
-    return _ncdf(d1)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    return _norm_cdf(d1)
 
 
-def _implied_vol(price: float, S: float, K: float, T: float) -> Optional[float]:
-    if T < 1e-9 or price <= 0 or price <= max(S - K, 0.0) + 1e-6:
-        return None
-    lo, hi = 1e-4, 20.0
-    if _bs_call(S, K, T, hi) < price:
-        return None
-    for _ in range(60):
-        mid = (lo + hi) * 0.5
-        if _bs_call(S, K, T, mid) > price:
-            hi = mid
-        else:
-            lo = mid
-    return (lo + hi) * 0.5
-
-
-def _tte_years(day: int, timestamp: int) -> float:
-    return max((8 - day) - timestamp / _TS_SPAN, 1e-9) / _TDAY
-
-
-def _median(lst: List[float]) -> float:
-    s = sorted(lst)
-    n = len(s)
-    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) * 0.5
-
-
-# ── Params ────────────────────────────────────────────────────────────────────
-_PARAMS_FILE = Path(__file__).parent / "params.json"
-if _PARAMS_FILE.exists():
-    with open(_PARAMS_FILE) as _f:
-        TUNING_PARAMS = json.load(_f)
-else:
-    TUNING_PARAMS = {}
-
-
-# ── Logger ────────────────────────────────────────────────────────────────────
 class Logger:
-    PREFIX = 'LOGVIZ:'
-
-    def __init__(self, auto_print: bool = True):
-        self._auto_print = auto_print
-        self._buffer: list[str] = []
-
-    def _emit(self, line: str) -> None:
-        if self._auto_print:
-            print(line)
-        else:
-            self._buffer.append(line)
+    PREFIX = "LOGVIZ:"
 
     def log(self, **series: float) -> None:
-        clean: dict[str, float] = {}
-        for k, v in series.items():
-            try:
-                clean[k] = float(v)
-            except (TypeError, ValueError):
-                pass
+        clean = {k: float(v) for k, v in series.items() if v == v}
         if clean:
-            self._emit(self.PREFIX + json.dumps(clean, separators=(',', ':')))
+            print(self.PREFIX + json.dumps(clean, separators=(",", ":")))
 
     def log_order(self, product: str, side: str, price: int, qty: int, tag: str) -> None:
-        self._emit(f'LOGORDER:{product}:{side}:{price}:{qty}:{tag}')
-
-    def flush(self) -> str:
-        out = '\n'.join(self._buffer)
-        self._buffer.clear()
-        return out
+        print(f"LOGORDER:{product}:{side}:{price}:{qty}:{tag}")
 
 
-# ── Options Arb ───────────────────────────────────────────────────────────────
-class OptionsArb:
-    """
-    Each tick, for each active strike:
-      - Bid IV is computed using underlying ask as S  (cost to hedge long option by selling und)
-      - Ask IV is computed using underlying bid as S  (cost to hedge short option by buying und)
+class CondorDeltaHedge:
+    def __init__(self, logger: Logger, params: dict):
+        self.logger = logger
+        self.p = params
 
-    Signal:
-      - median_bid_iv - bid_iv > threshold  → BUY option at ask, SELL underlying at bid
-      - ask_iv - median_ask_iv > threshold  → SELL option at bid, BUY underlying at ask
+    def _mid(self, od: OrderDepth) -> Optional[float]:
+        bb = max(od.buy_orders)  if od.buy_orders  else None
+        ba = min(od.sell_orders) if od.sell_orders else None
+        if bb is None or ba is None:
+            return None
+        return (bb + ba) / 2.0
 
-    Sizing: whichever leg (option or underlying) hits its volume/limit ceiling first
-    determines the trade size; the other leg is scaled down to match delta neutrality.
-    """
-    UNDERLYING = "VELVETFRUIT_EXTRACT"
-    UND_LIMIT  = 200
-    STRIKES    = [5200]
+    def _tte(self, ts: dict, timestamp: int) -> float:
+        prev = ts.get("prev_ts", -1)
+        day  = ts.get("day", self.p["start_day"])
+        if 0 <= timestamp < prev:
+            day += 1
+            ts["day"] = day
+        ts["prev_ts"] = timestamp
+        tte_days = max(self.p["total_expiry_days"] - day - timestamp / TS_PER_DAY, 1e-9)
+        return tte_days / 252.0
 
-    def __init__(self, logger: Logger, params: Dict[str, Any]):
-        self.logger            = logger
-        self.iv_window         = int(params.get("iv_window", 100))
-        self.iv_diff_threshold = float(params.get("iv_diff_threshold", 0.002))
-        self.option_limit      = int(params.get("option_limit", 200))
+    def _sweep_buy(self, sym: str, od: OrderDepth, want: int) -> List[Order]:
+        orders, rem = [], want
+        for price in sorted(od.sell_orders):
+            if rem <= 0:
+                break
+            qty = min(rem, -od.sell_orders[price])
+            orders.append(Order(sym, price, qty))
+            self.logger.log_order(sym, "BUY", price, qty, "FILL")
+            rem -= qty
+        return orders
 
-    def _track_day(self, state: TradingState, sd: Dict[str, Any]) -> int:
-        if "opt_prev_ts" not in sd:
-            sd["opt_day"] = 0
-        elif state.timestamp < sd["opt_prev_ts"]:
-            sd["opt_day"] = sd.get("opt_day", 0) + 1
-        sd["opt_prev_ts"] = state.timestamp
-        return sd["opt_day"]
+    def _sweep_sell(self, sym: str, od: OrderDepth, want: int) -> List[Order]:
+        orders, rem = [], want
+        for price in sorted(od.buy_orders, reverse=True):
+            if rem <= 0:
+                break
+            qty = min(rem, od.buy_orders[price])
+            orders.append(Order(sym, price, -qty))
+            self.logger.log_order(sym, "SELL", price, qty, "FILL")
+            rem -= qty
+        return orders
 
-    def _size(self, opt_avail: int, opt_cap: int,
-              und_avail: int, und_cap: int, delta: float):
-        """
-        Returns (opt_qty, und_qty) such that und_qty = round(opt_qty * delta),
-        scaled so neither leg exceeds its available volume or position capacity.
-        The smaller constraint exhausts first; the other is adjusted to match.
-        """
-        if delta < 1e-6:
-            return 0, 0
-        opt_max = min(opt_avail, opt_cap)
-        und_max = min(und_avail, und_cap)
-        if opt_max <= 0 or und_max <= 0:
-            return 0, 0
-
-        desired_und = round(opt_max * delta)
-        if desired_und <= und_max:
-            # option is the binding constraint
-            return opt_max, desired_und
-        else:
-            # underlying is the binding constraint — scale option down
-            und_qty = und_max
-            opt_qty = math.floor(und_qty / delta)
-            und_qty = round(opt_qty * delta)
-            return opt_qty, und_qty
-
-    def run(self, state: TradingState, sd: Dict[str, Any]) -> Dict[str, List[Order]]:
+    def run(self, state: TradingState, ts: dict) -> Dict[str, List[Order]]:
         result: Dict[str, List[Order]] = {}
 
-        day = self._track_day(state, sd)
-        T   = _tte_years(day, state.timestamp)
-
-        und_od = state.order_depths.get(self.UNDERLYING)
-        if not und_od or not und_od.buy_orders or not und_od.sell_orders:
+        und_od = state.order_depths.get(UNDERLYING)
+        if und_od is None:
+            return result
+        S = self._mid(und_od)
+        if S is None:
             return result
 
-        S_bid = max(und_od.buy_orders)
-        S_ask = min(und_od.sell_orders)
+        tte   = self._tte(ts, state.timestamp)
+        sigma = self.p["sigma"]
+        r     = self.p["r"]
+        olim  = self.p["option_limit"]
+        ulim  = self.p["underlying_limit"]
 
-        und_pos      = int(state.position.get(self.UNDERLYING, 0))
-        und_buy_cap  = self.UND_LIMIT - und_pos
-        und_sell_cap = self.UND_LIMIT + und_pos
-
-        und_orders: List[Order] = []
-
-        for K in self.STRIKES:
-            prod = f"VEV_{K}"
-            od   = state.order_depths.get(prod)
-            if not od:
+        # 1. sell ATM calls (5200, 5300) to -limit
+        for sym in SHORT_SYMS:
+            od = state.order_depths.get(sym)
+            if od is None or not od.buy_orders:
                 continue
+            pos  = int(state.position.get(sym, 0))
+            need = olim + pos              # units still shortable
+            if need <= 0:
+                continue
+            orders = self._sweep_sell(sym, od, need)
+            if orders:
+                result[sym] = orders
 
-            best_bid = max(od.buy_orders,  default=None)
-            best_ask = min(od.sell_orders, default=None)
+        # 2. buy OTM calls (5400, 5500) to +limit
+        for sym in LONG_SYMS:
+            od = state.order_depths.get(sym)
+            if od is None or not od.sell_orders:
+                continue
+            pos  = int(state.position.get(sym, 0))
+            need = olim - pos              # units still buyable
+            if need <= 0:
+                continue
+            orders = self._sweep_buy(sym, od, need)
+            if orders:
+                result[sym] = orders
 
-            # IV: bid uses S_ask, ask uses S_bid (matches analysis plot)
-            bid_iv = _implied_vol(best_bid, S_ask, K, T) if best_bid is not None else None
-            ask_iv = _implied_vol(best_ask, S_bid, K, T) if best_ask is not None else None
+        # 3. rebalance underlying to complete delta neutral
+        tick = ts.get("tick", 0)
+        ts["tick"] = tick + 1
+        if tick % self.p["rebalance_ticks"] == 0:
+            net_delta = 0.0
+            for sym in SHORT_SYMS + LONG_SYMS:
+                K   = STRIKES[sym]
+                pos = int(state.position.get(sym, 0))
+                net_delta += pos * bs_delta(S, K, r, sigma, tte)
 
-            b_buf: List[float] = sd.get(f"biv_{K}", [])
-            a_buf: List[float] = sd.get(f"aiv_{K}", [])
-            if bid_iv is not None:
-                b_buf.append(bid_iv)
-                b_buf = b_buf[-self.iv_window:]
-            if ask_iv is not None:
-                a_buf.append(ask_iv)
-                a_buf = a_buf[-self.iv_window:]
-            sd[f"biv_{K}"] = b_buf
-            sd[f"aiv_{K}"] = a_buf
+            target_und = max(-ulim, min(ulim, -round(net_delta)))
+            und_pos    = int(state.position.get(UNDERLYING, 0))
+            diff       = target_und - und_pos
+            if diff > 0:
+                orders = self._sweep_buy(UNDERLYING, und_od, diff)
+                if orders:
+                    result[UNDERLYING] = orders
+            elif diff < 0:
+                orders = self._sweep_sell(UNDERLYING, und_od, -diff)
+                if orders:
+                    result[UNDERLYING] = orders
 
-            med_bid_iv = _median(b_buf) if len(b_buf) >= 5 else None
-            med_ask_iv = _median(a_buf) if len(a_buf) >= 5 else None
-
-            self.logger.log(**{
-                f"bid_iv_{K}":     bid_iv     if bid_iv     is not None else float("nan"),
-                f"ask_iv_{K}":     ask_iv     if ask_iv     is not None else float("nan"),
-                f"med_bid_iv_{K}": med_bid_iv if med_bid_iv is not None else float("nan"),
-                f"med_ask_iv_{K}": med_ask_iv if med_ask_iv is not None else float("nan"),
-            })
-
-            pos          = int(state.position.get(prod, 0))
-            opt_buy_cap  = self.option_limit - pos
-            opt_sell_cap = self.option_limit + pos
-            opt_orders: List[Order] = []
-
-            # ── BUY option (bid IV below median) + SELL underlying ───────────
-            if (bid_iv is not None and med_bid_iv is not None
-                    and best_ask is not None
-                    and med_bid_iv - bid_iv > self.iv_diff_threshold):
-
-                delta     = _bs_delta(S_ask, K, T, med_bid_iv)
-                opt_avail = abs(od.sell_orders[best_ask])
-                und_avail = abs(und_od.buy_orders.get(S_bid, 0))
-
-                opt_qty, und_qty = self._size(
-                    opt_avail, opt_buy_cap, und_avail, und_sell_cap, delta)
-
-                if opt_qty > 0:
-                    opt_orders.append(Order(prod, best_ask, opt_qty))
-                    self.logger.log_order(prod, "BUY", best_ask, opt_qty, "IV_CHEAP")
-                if und_qty > 0:
-                    und_orders.append(Order(self.UNDERLYING, S_bid, -und_qty))
-                    self.logger.log_order(self.UNDERLYING, "SELL", S_bid, und_qty, "DELTA_HEDGE")
-                    und_sell_cap -= und_qty
-
-            # ── SELL option (ask IV above median) + BUY underlying ──────────
-            if (ask_iv is not None and med_ask_iv is not None
-                    and best_bid is not None
-                    and ask_iv - med_ask_iv > self.iv_diff_threshold):
-
-                delta     = _bs_delta(S_bid, K, T, med_ask_iv)
-                opt_avail = abs(od.buy_orders[best_bid])
-                und_avail = abs(und_od.sell_orders.get(S_ask, 0))
-
-                opt_qty, und_qty = self._size(
-                    opt_avail, opt_sell_cap, und_avail, und_buy_cap, delta)
-
-                if opt_qty > 0:
-                    opt_orders.append(Order(prod, best_bid, -opt_qty))
-                    self.logger.log_order(prod, "SELL", best_bid, opt_qty, "IV_RICH")
-                if und_qty > 0:
-                    und_orders.append(Order(self.UNDERLYING, S_ask, und_qty))
-                    self.logger.log_order(self.UNDERLYING, "BUY", S_ask, und_qty, "DELTA_HEDGE")
-                    und_buy_cap -= und_qty
-
-            if opt_orders:
-                result[prod] = opt_orders
-
-        if und_orders:
-            merged: Dict[int, int] = {}
-            for o in und_orders:
-                merged[o.price] = merged.get(o.price, 0) + o.quantity
-            result[self.UNDERLYING] = [
-                Order(self.UNDERLYING, p, q) for p, q in merged.items() if q != 0
-            ]
+            self.logger.log(S=S, net_delta=net_delta, und_pos=und_pos,
+                            target_und=target_und, tte=tte)
 
         return result
 
 
-# ── Trader ────────────────────────────────────────────────────────────────────
 class Trader:
     def __init__(self):
-        self.logger = Logger()
-        self.arb    = OptionsArb(self.logger, TUNING_PARAMS)
+        self.logger   = Logger()
+        self.strategy = CondorDeltaHedge(self.logger, TUNING_PARAMS)
 
     def run(self, state: TradingState):
         try:
-            sd = json.loads(state.traderData) if state.traderData else {}
+            ts = json.loads(state.traderData) if state.traderData else {}
         except Exception:
-            sd = {}
+            ts = {}
 
-        result = self.arb.run(state, sd)
-        return result, 0, json.dumps(sd)
+        result = self.strategy.run(state, ts)
+        return result, 0, json.dumps(ts)
