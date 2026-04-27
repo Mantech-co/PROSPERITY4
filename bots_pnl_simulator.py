@@ -18,16 +18,6 @@ BORDER = '#1e2330'
 TEXT = '#c8d0e0'
 DIM = '#4a5068'
 ACCENT_CYAN = '#00d4ff'
-
-FIXED_BOT_COLORS = {
-    'Mark 01': '#ff6b6b',
-    'Mark 14': '#ffd166',
-    'Mark 22': '#06d6a0',
-    'Mark 38': '#118ab2',
-    'Mark 49': '#ef476f',
-    'Mark 55': '#b06dff',
-    'Mark 67': '#ff9f43',
-}
 ACCENT_GOLD = '#ffd700'
 ACCENT_ORANGE = '#ff9f43'
 
@@ -49,6 +39,11 @@ QComboBox, QPushButton {{
 QPushButton:hover {{
     border-color: {ACCENT_CYAN};
 }}
+QPushButton:checked {{
+    background-color: {BORDER};
+    color: {ACCENT_CYAN};
+    border: 1px solid {ACCENT_CYAN};
+}}
 QLabel {{
     font-weight: bold;
     color: {ACCENT_CYAN};
@@ -59,15 +54,11 @@ QTableWidget {{
     gridline-color: {BORDER};
     border: none;
 }}
-QTableWidget::item {{
-    padding: 4px;
-    border-bottom: 1px solid {BORDER};
-}}
 QHeaderView::section {{
     background-color: {PANEL_BG};
     color: {ACCENT_CYAN};
     border: 1px solid {BORDER};
-    padding: 6px;
+    padding: 4px 8px;
     font-weight: bold;
 }}
 """
@@ -75,26 +66,100 @@ QHeaderView::section {{
 class BotSimEngine(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Bot Simulation Engine: Advanced Analytics")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setWindowTitle("Bot Simulation Engine: PnL & Positions")
+        self.setGeometry(100, 100, 1400, 800)
         pg.setConfigOptions(useOpenGL=True, antialias=True)
         
         self.prices_df = pd.DataFrame()
         self.legs_df = pd.DataFrame()
         self.bot_colors = {}
-        self.markup_lines = []
         self.current_stats = {}
+        self.markup_lines = []
+        self.trade_scatters = []
         
+        self._load_data()
         self._build_ui()
-        self._setup_shortcuts()
+        self._populate_dropdowns()
+        self._update_plots()
 
-    def _setup_shortcuts(self):
-        QShortcut(QKeySequence("A"), self).activated.connect(self._autoscale_all)
-        QShortcut(QKeySequence("C"), self).activated.connect(self._clear_markup)
-        QShortcut(QKeySequence("D"), self).activated.connect(self._show_data_pane)
-        QShortcut(QKeySequence("X"), self).activated.connect(lambda: self._set_zoom('x'))
-        QShortcut(QKeySequence("Y"), self).activated.connect(lambda: self._set_zoom('y'))
-        QShortcut(QKeySequence("Z"), self).activated.connect(lambda: self._set_zoom('xy'))
+    def _load_data(self):
+        data_dir = "data"
+        price_files = [os.path.join(data_dir, f"prices_round_4_day_{d}.csv") for d in [1, 2, 3]]
+        trade_files = [os.path.join(data_dir, f"trades_round_4_day_{d}.csv") for d in [1, 2, 3]]
+        
+        p_dfs = []
+        for f in price_files:
+            if os.path.exists(f):
+                p_dfs.append(pd.read_csv(f, sep=';'))
+        if p_dfs:
+            self.prices_df = pd.concat(p_dfs, ignore_index=True)
+            self.prices_df['mid_price'] = self.prices_df['mid_price'].fillna(
+                (self.prices_df['bid_price_1'] + self.prices_df['ask_price_1']) / 2
+            )
+            
+        t_dfs = []
+        for f in trade_files:
+            if os.path.exists(f):
+                df = pd.read_csv(f, sep=';')
+                day_match = re.search(r"day_(\d+)", f)
+                day = int(day_match.group(1)) if day_match else 1
+                df['day'] = day
+                t_dfs.append(df)
+                
+        if t_dfs:
+            trades_df = pd.concat(t_dfs, ignore_index=True)
+            self._process_legs(trades_df)
+
+    def _process_legs(self, trades_df):
+        if 'day' not in trades_df.columns:
+            trades_df['day'] = self.prices_df['day'].iloc[0] if not self.prices_df.empty else 1
+
+        buys = trades_df[['day', 'timestamp', 'symbol', 'buyer', 'price', 'quantity']].copy()
+        buys.columns = ['day', 'timestamp', 'symbol', 'bot', 'price', 'quantity']
+        buys['pos_change'] = buys['quantity']
+        buys['cash_change'] = -buys['price'] * buys['quantity']
+        
+        sells = trades_df[['day', 'timestamp', 'symbol', 'seller', 'price', 'quantity']].copy()
+        sells.columns = ['day', 'timestamp', 'symbol', 'bot', 'price', 'quantity']
+        sells['pos_change'] = -sells['quantity']
+        sells['cash_change'] = sells['price'] * sells['quantity']
+        
+        legs = pd.concat([buys, sells], ignore_index=True)
+        legs = legs[~legs['bot'].astype(str).str.upper().isin(['NAN', 'NONE', ''])]
+        self.legs_df = legs
+        
+        unique_bots = sorted(self.legs_df['bot'].dropna().unique().tolist())
+        self.bot_colors = {
+            bot: pg.intColor(i, hues=max(1, len(unique_bots)), values=1, alpha=255)
+            for i, bot in enumerate(unique_bots)
+        }
+
+    def _open_log(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open Log File", "", "Log Files (*.log *.json);;All Files (*)")
+        if not path:
+            return
+
+        with open(path, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+
+        csv_str = raw.get('activitiesLog', '').replace('\\n', '\n')
+        if csv_str:
+            self.prices_df = pd.read_csv(StringIO(csv_str), sep=';')
+            self.prices_df.columns = self.prices_df.columns.str.strip()
+            
+            if 'mid_price' not in self.prices_df.columns or self.prices_df['mid_price'].isnull().all():
+                self.prices_df['mid_price'] = (self.prices_df['bid_price_1'] + self.prices_df['ask_price_1']) / 2
+
+        trades = raw.get('tradeHistory', [])
+        if trades:
+            trades_df = pd.DataFrame(trades)
+            self._process_legs(trades_df)
+        else:
+            self.legs_df = pd.DataFrame()
+            self.bot_colors = {}
+
+        self._populate_dropdowns()
+        self._update_plots()
 
     def _build_ui(self):
         central = QWidget()
@@ -105,10 +170,16 @@ class BotSimEngine(QMainWindow):
         
         controls = QHBoxLayout()
         
-        btn_import = QPushButton("📂 Import Data")
-        btn_import.clicked.connect(self._import_data)
-        controls.addWidget(btn_import)
-        
+        self.btn_open_log = QPushButton("📂 Open Log")
+        self.btn_open_log.clicked.connect(self._open_log)
+        controls.addWidget(self.btn_open_log)
+
+        controls.addWidget(QLabel("Scale:"))
+        self.cb_scale = QComboBox()
+        self.cb_scale.addItems(["Linear", "SymLog"])
+        self.cb_scale.currentTextChanged.connect(self._update_plots)
+        controls.addWidget(self.cb_scale)
+
         controls.addWidget(QLabel("Day:"))
         self.cb_day = QComboBox()
         self.cb_day.currentTextChanged.connect(self._update_plots)
@@ -123,17 +194,18 @@ class BotSimEngine(QMainWindow):
         self.cb_bot = QComboBox()
         self.cb_bot.currentTextChanged.connect(self._update_plots)
         controls.addWidget(self.cb_bot)
+
+        self.btn_toggle_trades = QPushButton("📌 Show Trades")
+        self.btn_toggle_trades.setCheckable(True)
+        self.btn_toggle_trades.setChecked(True)
+        self.btn_toggle_trades.clicked.connect(self._toggle_trades_visibility)
+        controls.addWidget(self.btn_toggle_trades)
         
-        btn_data = QPushButton("📊 View Stats [D]")
-        btn_data.clicked.connect(self._show_data_pane)
-        controls.addWidget(btn_data)
+        self.btn_data = QPushButton("📊 Data Pane")
+        self.btn_data.clicked.connect(self._show_data_pane)
+        controls.addWidget(self.btn_data)
         
         controls.addStretch()
-        
-        self.lbl_info = QLabel("Use [A] AutoScale | [C] Clear | [X/Y/Z] Zoom Modes")
-        self.lbl_info.setStyleSheet(f"color: {DIM}; font-weight: normal;")
-        controls.addWidget(self.lbl_info)
-        
         main_layout.addLayout(controls)
         
         self.gw = pg.GraphicsLayoutWidget()
@@ -149,107 +221,70 @@ class BotSimEngine(QMainWindow):
         self.p_pos.setXLink(self.p_pnl)
         
         self.p_pnl.scene().sigMouseClicked.connect(self._on_mouse_clicked)
-        self.p_pos.scene().sigMouseClicked.connect(self._on_mouse_clicked)
-
-    def _import_data(self):
-        data_dir = QFileDialog.getExistingDirectory(self, "Select Data Directory containing CSVs")
-        if not data_dir: return
+        QShortcut(QKeySequence("C"), self).activated.connect(self._clear_markup)
         
-        p_dfs, t_dfs = [], []
-        for f in os.listdir(data_dir):
-            if not f.endswith('.csv'): continue
-            path = os.path.join(data_dir, f)
-            
-            try:
-                if f.startswith("prices_"):
-                    df = pd.read_csv(path, sep=';')
-                    p_dfs.append(df)
-                elif f.startswith("trades_"):
-                    df = pd.read_csv(path, sep=';')
-                    day_match = re.search(r"day_(-?\d+)", f)
-                    if day_match:
-                        df['day'] = int(day_match.group(1))
-                    t_dfs.append(df)
-            except Exception as e:
-                print(f"Failed to load {f}: {e}")
-                
-        if p_dfs:
-            self.prices_df = pd.concat(p_dfs, ignore_index=True)
-            self.prices_df['mid_price'] = self.prices_df['mid_price'].fillna(
-                (self.prices_df['bid_price_1'] + self.prices_df['ask_price_1']) / 2
-            )
-            
-        if t_dfs:
-            trades_df = pd.concat(t_dfs, ignore_index=True)
-            
-            buys = trades_df[['day', 'timestamp', 'symbol', 'buyer', 'price', 'quantity']].copy()
-            buys.columns = ['day', 'timestamp', 'symbol', 'bot', 'price', 'quantity']
-            buys['pos_change'] = buys['quantity']
-            buys['cash_change'] = -buys['price'] * buys['quantity']
-            
-            sells = trades_df[['day', 'timestamp', 'symbol', 'seller', 'price', 'quantity']].copy()
-            sells.columns = ['day', 'timestamp', 'symbol', 'bot', 'price', 'quantity']
-            sells['pos_change'] = -sells['quantity']
-            sells['cash_change'] = sells['price'] * sells['quantity']
-            
-            legs = pd.concat([buys, sells], ignore_index=True)
-            legs = legs[~legs['bot'].astype(str).str.upper().isin(['SUBMISSION', 'NAN', ''])]
-            self.legs_df = legs
-            
-            unique_bots = sorted(self.legs_df['bot'].dropna().unique().tolist())
-            self.bot_colors = {}
-            for i, bot in enumerate(unique_bots):
-                if bot in FIXED_BOT_COLORS:
-                    self.bot_colors[bot] = pg.mkColor(FIXED_BOT_COLORS[bot])
-                else:
-                    self.bot_colors[bot] = pg.intColor(i, hues=max(1, len(unique_bots)), values=1, alpha=255)
-                    
-        self._populate_dropdowns()
-        self._update_plots()
-
     def _populate_dropdowns(self):
         if self.prices_df.empty: return
         
         self.cb_day.blockSignals(True)
+        if 'day' in self.prices_df.columns:
+            days = ['All'] + [str(d) for d in sorted(self.prices_df['day'].dropna().unique())]
+        else:
+            days = ['All', '1']
         self.cb_day.clear()
-        days = ['All'] + [str(d) for d in sorted(self.prices_df['day'].unique())]
         self.cb_day.addItems(days)
         self.cb_day.blockSignals(False)
         
         self.cb_prod.blockSignals(True)
+        prods = sorted(self.prices_df['product'].dropna().unique())
         self.cb_prod.clear()
-        prods = sorted(self.prices_df['product'].unique())
         self.cb_prod.addItems(prods)
         self.cb_prod.blockSignals(False)
         
         self.cb_bot.blockSignals(True)
+        if not self.legs_df.empty:
+            bots = ['All'] + sorted(self.legs_df['bot'].unique().tolist())
+        else:
+            bots = ['All']
         self.cb_bot.clear()
-        bots = ['All'] + sorted(self.legs_df['bot'].unique().tolist())
         self.cb_bot.addItems(bots)
         self.cb_bot.blockSignals(False)
+
+    def _toggle_trades_visibility(self):
+        is_visible = self.btn_toggle_trades.isChecked()
+        for scatter in self.trade_scatters:
+            scatter.setVisible(is_visible)
 
     def _update_plots(self):
         self.p_pnl.clear()
         self.p_pos.clear()
         self.current_stats.clear()
+        self.trade_scatters.clear()
         
-        if self.prices_df.empty or self.legs_df.empty: return
+        if self.prices_df.empty or self.legs_df.empty:
+            return
             
         day_sel = self.cb_day.currentText()
         prod_sel = self.cb_prod.currentText()
         bot_sel = self.cb_bot.currentText()
+        use_symlog = self.cb_scale.currentText() == "SymLog"
         
         if not prod_sel: return
         
         p_mask = self.prices_df['product'] == prod_sel
-        if day_sel != 'All':
+        if day_sel != 'All' and 'day' in self.prices_df.columns:
             p_mask &= self.prices_df['day'] == int(day_sel)
-        p_sub = self.prices_df[p_mask].sort_values(['day', 'timestamp'])
+            
+        p_sub = self.prices_df[p_mask].copy()
+        if 'day' in p_sub.columns:
+            p_sub = p_sub.sort_values(['day', 'timestamp'])
+        else:
+            p_sub = p_sub.sort_values(['timestamp'])
         
         if p_sub.empty: return
         
-        min_day = p_sub['day'].min()
-        if day_sel == 'All':
+        min_day = p_sub['day'].min() if 'day' in p_sub.columns else 1
+        if day_sel == 'All' and 'day' in p_sub.columns:
             p_sub['cts'] = p_sub['timestamp'] + (p_sub['day'] - min_day) * 1000000
             t_col = 'cts'
         else:
@@ -258,11 +293,12 @@ class BotSimEngine(QMainWindow):
         timeline = p_sub[[t_col, 'mid_price']].copy()
         
         l_mask = self.legs_df['symbol'] == prod_sel
-        if day_sel != 'All':
+        if day_sel != 'All' and 'day' in self.legs_df.columns:
             l_mask &= self.legs_df['day'] == int(day_sel)
+            
         l_sub = self.legs_df[l_mask].copy()
         
-        if day_sel == 'All' and not l_sub.empty:
+        if day_sel == 'All' and 'day' in l_sub.columns and not l_sub.empty:
             l_sub['cts'] = l_sub['timestamp'] + (l_sub['day'] - min_day) * 1000000
             l_t_col = 'cts'
         else:
@@ -282,44 +318,72 @@ class BotSimEngine(QMainWindow):
             
             merged['position'] = merged['pos_change'].cumsum()
             merged['cash'] = merged['cash_change'].cumsum()
-            merged['pnl'] = merged['cash'] + merged['position'] * merged['mid_price']
             
+            # Raw PnL Calculation
+            pnl_vals_raw = merged['cash'] + merged['position'] * merged['mid_price']
             t_vals = merged[t_col].to_numpy()
-            pnl_vals = merged['pnl'].to_numpy()
             pos_vals = merged['position'].to_numpy()
             
-            # Calculate basic stats
-            returns = np.diff(pnl_vals)
-            sharpe = 0
+            # Apply Symlog if selected
+            if use_symlog:
+                pnl_vals = np.sign(pnl_vals_raw) * np.log10(1 + np.abs(pnl_vals_raw))
+            else:
+                pnl_vals = pnl_vals_raw.to_numpy()
+            
+            net_pnl = pnl_vals_raw.iloc[-1] if len(pnl_vals_raw) > 0 else 0
+            max_pos = np.max(np.abs(pos_vals)) if len(pos_vals) > 0 else 0
+            returns = np.diff(pnl_vals_raw)
             if len(returns) > 1 and np.std(returns) > 0:
                 sharpe = (np.mean(returns) / np.std(returns)) * np.sqrt(len(returns))
+            else:
+                sharpe = float('nan')
                 
             self.current_stats[bot] = {
-                'Net PnL': pnl_vals[-1] if len(pnl_vals) > 0 else 0,
-                'Max Abs Pos': np.max(np.abs(pos_vals)) if len(pos_vals) > 0 else 0,
+                'Net PnL': net_pnl,
+                'Max Abs Pos': max_pos,
                 'Sharpe': sharpe
             }
             
             color = self.bot_colors.get(bot, pg.mkColor(ACCENT_CYAN))
+            if bot.upper() == 'SUBMISSION':
+                color = pg.mkColor(ACCENT_GOLD)
             pen = pg.mkPen(color, width=2)
             
             self.p_pnl.plot(t_vals, pnl_vals, pen=pen, name=bot)
             self.p_pos.plot(t_vals, pos_vals, pen=pen, stepMode='right')
 
-    def _set_zoom(self, mode):
-        self.p_pnl.setMouseEnabled(x=(mode in ['x', 'xy']), y=(mode in ['y', 'xy']))
-        self.p_pos.setMouseEnabled(x=(mode in ['x', 'xy']), y=(mode in ['y', 'xy']))
+            # Render Trade Markers (Scatter)
+            buy_mask = merged['pos_change'] > 0
+            sell_mask = merged['pos_change'] < 0
+            
+            buy_t = t_vals[buy_mask]
+            buy_pnl = pnl_vals[buy_mask]
+            
+            sell_t = t_vals[sell_mask]
+            sell_pnl = pnl_vals[sell_mask]
 
-    def _autoscale_all(self):
-        self.p_pnl.autoRange()
-        self.p_pos.autoRange()
+            is_trades_visible = self.btn_toggle_trades.isChecked()
+
+            if len(buy_t) > 0:
+                sc_buy = pg.ScatterPlotItem(x=buy_t, y=buy_pnl, symbol='t1', size=9, brush=ACCENT_CYAN, pen=pg.mkPen('k', width=0.5))
+                sc_buy.setVisible(is_trades_visible)
+                self.p_pnl.addItem(sc_buy)
+                self.trade_scatters.append(sc_buy)
+
+            if len(sell_t) > 0:
+                sc_sell = pg.ScatterPlotItem(x=sell_t, y=sell_pnl, symbol='t', size=9, brush=ACCENT_ORANGE, pen=pg.mkPen('k', width=0.5))
+                sc_sell.setVisible(is_trades_visible)
+                self.p_pnl.addItem(sc_sell)
+                self.trade_scatters.append(sc_sell)
+
+        self.p_pnl.setTitle(f"Net PnL ({'SymLog Base 10' if use_symlog else 'Linear'})")
 
     def _on_mouse_clicked(self, event):
-        if event.button() != Qt.MouseButton.LeftButton: return
-        
+        if event.button() != Qt.MouseButton.RightButton: return
+        pos = event.scenePos()
         for p in [self.p_pnl, self.p_pos]:
-            if p.sceneBoundingRect().contains(event.scenePos()):
-                mouse_point = p.vb.mapSceneToView(event.scenePos())
+            if p.sceneBoundingRect().contains(pos):
+                mouse_point = p.vb.mapSceneToView(pos)
                 x, y = mouse_point.x(), mouse_point.y()
                 
                 vl = pg.InfiniteLine(pos=x, angle=90, pen=pg.mkPen(ACCENT_GOLD, width=1, style=Qt.PenStyle.DashLine))
