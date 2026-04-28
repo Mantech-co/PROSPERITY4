@@ -1,7 +1,6 @@
 time stamp, inter arrival time, bot vs bot, bot vs market order, volume, spread from mid price, portfolio, position, volatility, profit, percentage change profit, profit in product, correlation between bots
 
 filter noise
-
 see traders who don't trade against each other and maybe group them as one and analyse again
 
 clarity required:
@@ -24,9 +23,6 @@ general insights:
 - m38, m49, m55, m67 have a general trend of where wrt mid price they trade but some times they spike and go to the over side of the mid price and do something, probably when they have a signal
 - m38, m55 have directional information of market
 - m22, m49, m67 are probably have time-based information of the market
-
-
-General insights:
 - one bot is putting L1 spread (M14)
 - one bot is putting L2 spread (M01)
 
@@ -129,3 +125,13 @@ profit n loss analysis:
 
 
 - m38 has signal maybe, decreases spread when it has, goes in more agressively
+
+
+
+
+
+
+
+Individual graph analysis:
+Hydrogel:
+m38 with volume 2 is good at identifying peaks (does opposite trade with order book)
