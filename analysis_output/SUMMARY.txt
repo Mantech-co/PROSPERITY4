@@ -1,0 +1,250 @@
+================================================================================
+ROUND 5 MARKET ANALYSIS SUMMARY
+================================================================================
+
+── ADF STATIONARITY ──
+Stationary (p<0.05):     2 products
+Non-stationary:          48 products
+Stationary: ['SNACKPACK_RASPBERRY', 'SNACKPACK_VANILLA']
+Non-stationary: ['GALAXY_SOUNDS_BLACK_HOLES', 'GALAXY_SOUNDS_DARK_MATTER', 'GALAXY_SOUNDS_PLANETARY_RINGS', 'GALAXY_SOUNDS_SOLAR_FLAMES', 'GALAXY_SOUNDS_SOLAR_WINDS', 'MICROCHIP_CIRCLE', 'MICROCHIP_OVAL', 'MICROCHIP_RECTANGLE', 'MICROCHIP_SQUARE', 'MICROCHIP_TRIANGLE', 'OXYGEN_SHAKE_CHOCOLATE', 'OXYGEN_SHAKE_EVENING_BREATH', 'OXYGEN_SHAKE_GARLIC', 'OXYGEN_SHAKE_MINT', 'OXYGEN_SHAKE_MORNING_BREATH', 'PANEL_1X2', 'PANEL_1X4', 'PANEL_2X2', 'PANEL_2X4', 'PANEL_4X4', 'PEBBLES_L', 'PEBBLES_M', 'PEBBLES_S', 'PEBBLES_XL', 'PEBBLES_XS', 'ROBOT_DISHES', 'ROBOT_IRONING', 'ROBOT_LAUNDRY', 'ROBOT_MOPPING', 'ROBOT_VACUUMING', 'SLEEP_POD_COTTON', 'SLEEP_POD_LAMB_WOOL', 'SLEEP_POD_NYLON', 'SLEEP_POD_POLYESTER', 'SLEEP_POD_SUEDE', 'SNACKPACK_CHOCOLATE', 'SNACKPACK_PISTACHIO', 'SNACKPACK_STRAWBERRY', 'TRANSLATOR_ASTRO_BLACK', 'TRANSLATOR_ECLIPSE_CHARCOAL', 'TRANSLATOR_GRAPHITE_MIST', 'TRANSLATOR_SPACE_GRAY', 'TRANSLATOR_VOID_BLUE', 'UV_VISOR_AMBER', 'UV_VISOR_MAGENTA', 'UV_VISOR_ORANGE', 'UV_VISOR_RED', 'UV_VISOR_YELLOW']
+
+── MEAN REVERSION HALF-LIVES (top 10 fastest) ──
+  SNACKPACK_RASPBERRY                           624.4 ticks
+  SNACKPACK_VANILLA                             1077.3 ticks
+  SNACKPACK_CHOCOLATE                           1300.3 ticks
+  GALAXY_SOUNDS_DARK_MATTER                     1421.8 ticks
+  SNACKPACK_PISTACHIO                           1570.8 ticks
+  ROBOT_DISHES                                  1593.3 ticks
+  OXYGEN_SHAKE_EVENING_BREATH                   1611.0 ticks
+  GALAXY_SOUNDS_SOLAR_FLAMES                    1750.8 ticks
+  TRANSLATOR_ECLIPSE_CHARCOAL                   1788.2 ticks
+  SLEEP_POD_LAMB_WOOL                           1809.7 ticks
+
+── MEAN REVERSION HALF-LIVES (top 10 slowest) ──
+  PANEL_2X2                                     6511.1 ticks
+  MICROCHIP_CIRCLE                              6561.5 ticks
+  UV_VISOR_AMBER                                7286.4 ticks
+  PEBBLES_XS                                    7490.8 ticks
+  GALAXY_SOUNDS_PLANETARY_RINGS                 8446.0 ticks
+  MICROCHIP_TRIANGLE                            8584.5 ticks
+  OXYGEN_SHAKE_GARLIC                           9008.8 ticks
+  PANEL_1X4                                     9540.4 ticks
+  GALAXY_SOUNDS_BLACK_HOLES                     17832.2 ticks
+  MICROCHIP_OVAL                                110602.4 ticks
+
+── SPREADS ──
+                               mean_spread  std_spread
+product                                               
+ROBOT_IRONING                     6.392933    1.037580
+ROBOT_VACUUMING                   6.753300    0.831101
+ROBOT_LAUNDRY                     7.165067    0.882711
+ROBOT_DISHES                      7.350267    0.854208
+MICROCHIP_OVAL                    7.449767    1.431018
+MICROCHIP_RECTANGLE               7.885767    0.974106
+ROBOT_MOPPING                     7.970667    0.984127
+MICROCHIP_CIRCLE                  8.262167    0.890053
+TRANSLATOR_ASTRO_BLACK            8.366400    0.942292
+PANEL_1X4                         8.376633    1.084322
+TRANSLATOR_SPACE_GRAY             8.402167    0.955855
+PANEL_2X2                         8.515467    1.015576
+SLEEP_POD_NYLON                   8.564667    0.975491
+MICROCHIP_TRIANGLE                8.635433    1.043820
+TRANSLATOR_ECLIPSE_CHARCOAL       8.700433    0.931301
+PANEL_4X4                         8.750467    0.971990
+TRANSLATOR_GRAPHITE_MIST          8.912100    0.968919
+SLEEP_POD_LAMB_WOOL               9.400100    1.013009
+TRANSLATOR_VOID_BLUE              9.524667    1.050728
+PEBBLES_XS                        9.744867    1.953126
+PANEL_2X4                         9.840500    1.110781
+SLEEP_POD_SUEDE                   9.949467    1.218864
+SLEEP_POD_COTTON                 10.050200    1.227897
+SLEEP_POD_POLYESTER              10.295700    1.288119
+UV_VISOR_AMBER                   10.320500    1.571622
+PANEL_1X2                        11.509767    1.331802
+PEBBLES_S                        11.551533    1.453254
+MICROCHIP_SQUARE                 11.718800    1.769604
+OXYGEN_SHAKE_EVENING_BREATH      11.860467    1.140369
+OXYGEN_SHAKE_CHOCOLATE           12.185467    1.339824
+OXYGEN_SHAKE_MINT                12.593567    1.364077
+OXYGEN_SHAKE_MORNING_BREATH      12.782900    1.464368
+PEBBLES_L                        13.020500    1.387952
+GALAXY_SOUNDS_DARK_MATTER        13.050833    1.320217
+PEBBLES_M                        13.120900    1.436971
+UV_VISOR_ORANGE                  13.284100    1.434151
+GALAXY_SOUNDS_SOLAR_WINDS        13.301267    1.432471
+GALAXY_SOUNDS_PLANETARY_RINGS    13.690033    1.601741
+UV_VISOR_YELLOW                  13.909967    1.553879
+UV_VISOR_RED                     14.039433    1.508781
+GALAXY_SOUNDS_SOLAR_FLAMES       14.071533    1.448454
+UV_VISOR_MAGENTA                 14.091600    1.528601
+GALAXY_SOUNDS_BLACK_HOLES        14.512767    1.789342
+OXYGEN_SHAKE_GARLIC              15.054600    1.822854
+SNACKPACK_PISTACHIO              15.925633    1.537676
+SNACKPACK_CHOCOLATE              16.471167    1.583494
+PEBBLES_XL                       16.630767    2.568849
+SNACKPACK_RASPBERRY              16.842467    1.610384
+SNACKPACK_VANILLA                16.868667    1.612319
+SNACKPACK_STRAWBERRY             17.826467    1.769611
+
+── VOLUME SUMMARY ──
+                      product  total_volume  trade_count  avg_size
+                   PEBBLES_XS          2283          644  3.545031
+                    PEBBLES_M          2283          644  3.545031
+                    PEBBLES_L          2283          644  3.545031
+                   PEBBLES_XL          2283          644  3.545031
+                    PEBBLES_S          2283          644  3.545031
+    GALAXY_SOUNDS_BLACK_HOLES          1805          733  2.462483
+  OXYGEN_SHAKE_MORNING_BREATH          1805          733  2.462483
+                    PANEL_1X2          1805          733  2.462483
+  OXYGEN_SHAKE_EVENING_BREATH          1805          733  2.462483
+       OXYGEN_SHAKE_CHOCOLATE          1805          733  2.462483
+                    PANEL_2X2          1805          733  2.462483
+            OXYGEN_SHAKE_MINT          1805          733  2.462483
+                    PANEL_1X4          1805          733  2.462483
+   GALAXY_SOUNDS_SOLAR_FLAMES          1805          733  2.462483
+    GALAXY_SOUNDS_DARK_MATTER          1805          733  2.462483
+          OXYGEN_SHAKE_GARLIC          1805          733  2.462483
+    GALAXY_SOUNDS_SOLAR_WINDS          1805          733  2.462483
+GALAXY_SOUNDS_PLANETARY_RINGS          1805          733  2.462483
+              UV_VISOR_YELLOW          1805          733  2.462483
+                 UV_VISOR_RED          1805          733  2.462483
+              SLEEP_POD_NYLON          1805          733  2.462483
+          SLEEP_POD_POLYESTER          1805          733  2.462483
+              SLEEP_POD_SUEDE          1805          733  2.462483
+                    PANEL_2X4          1805          733  2.462483
+                ROBOT_MOPPING          1805          733  2.462483
+                    PANEL_4X4          1805          733  2.462483
+          SLEEP_POD_LAMB_WOOL          1805          733  2.462483
+          SNACKPACK_PISTACHIO          1805          733  2.462483
+          SNACKPACK_CHOCOLATE          1805          733  2.462483
+                ROBOT_LAUNDRY          1805          733  2.462483
+                ROBOT_IRONING          1805          733  2.462483
+                 ROBOT_DISHES          1805          733  2.462483
+             SLEEP_POD_COTTON          1805          733  2.462483
+              ROBOT_VACUUMING          1805          733  2.462483
+  TRANSLATOR_ECLIPSE_CHARCOAL          1805          733  2.462483
+       TRANSLATOR_ASTRO_BLACK          1805          733  2.462483
+            SNACKPACK_VANILLA          1805          733  2.462483
+         SNACKPACK_STRAWBERRY          1805          733  2.462483
+          SNACKPACK_RASPBERRY          1805          733  2.462483
+     TRANSLATOR_GRAPHITE_MIST          1805          733  2.462483
+         TRANSLATOR_VOID_BLUE          1805          733  2.462483
+        TRANSLATOR_SPACE_GRAY          1805          733  2.462483
+             UV_VISOR_MAGENTA          1805          733  2.462483
+               UV_VISOR_AMBER          1805          733  2.462483
+              UV_VISOR_ORANGE          1805          733  2.462483
+             MICROCHIP_CIRCLE          1119          569  1.966608
+               MICROCHIP_OVAL          1119          569  1.966608
+           MICROCHIP_TRIANGLE          1119          569  1.966608
+             MICROCHIP_SQUARE          1119          569  1.966608
+          MICROCHIP_RECTANGLE          1119          569  1.966608
+
+── INTER-ARRIVAL TIME (sorted by mean IAT) ──
+                                  mean_iat  median_iat      std_iat
+product                                                            
+GALAXY_SOUNDS_BLACK_HOLES      4095.218579      2950.0  3703.071758
+GALAXY_SOUNDS_DARK_MATTER      4095.218579      2950.0  3703.071758
+GALAXY_SOUNDS_PLANETARY_RINGS  4095.218579      2950.0  3703.071758
+GALAXY_SOUNDS_SOLAR_FLAMES     4095.218579      2950.0  3703.071758
+GALAXY_SOUNDS_SOLAR_WINDS      4095.218579      2950.0  3703.071758
+OXYGEN_SHAKE_MINT              4095.218579      2950.0  3703.071758
+OXYGEN_SHAKE_CHOCOLATE         4095.218579      2950.0  3703.071758
+OXYGEN_SHAKE_EVENING_BREATH    4095.218579      2950.0  3703.071758
+OXYGEN_SHAKE_MORNING_BREATH    4095.218579      2950.0  3703.071758
+PANEL_1X2                      4095.218579      2950.0  3703.071758
+OXYGEN_SHAKE_GARLIC            4095.218579      2950.0  3703.071758
+ROBOT_MOPPING                  4095.218579      2950.0  3703.071758
+PANEL_4X4                      4095.218579      2950.0  3703.071758
+PANEL_2X4                      4095.218579      2950.0  3703.071758
+PANEL_2X2                      4095.218579      2950.0  3703.071758
+PANEL_1X4                      4095.218579      2950.0  3703.071758
+SLEEP_POD_COTTON               4095.218579      2950.0  3703.071758
+ROBOT_VACUUMING                4095.218579      2950.0  3703.071758
+SLEEP_POD_LAMB_WOOL            4095.218579      2950.0  3703.071758
+ROBOT_DISHES                   4095.218579      2950.0  3703.071758
+ROBOT_IRONING                  4095.218579      2950.0  3703.071758
+ROBOT_LAUNDRY                  4095.218579      2950.0  3703.071758
+TRANSLATOR_ECLIPSE_CHARCOAL    4095.218579      2950.0  3703.071758
+TRANSLATOR_ASTRO_BLACK         4095.218579      2950.0  3703.071758
+SNACKPACK_VANILLA              4095.218579      2950.0  3703.071758
+SNACKPACK_STRAWBERRY           4095.218579      2950.0  3703.071758
+SNACKPACK_RASPBERRY            4095.218579      2950.0  3703.071758
+SNACKPACK_PISTACHIO            4095.218579      2950.0  3703.071758
+SNACKPACK_CHOCOLATE            4095.218579      2950.0  3703.071758
+SLEEP_POD_SUEDE                4095.218579      2950.0  3703.071758
+SLEEP_POD_POLYESTER            4095.218579      2950.0  3703.071758
+SLEEP_POD_NYLON                4095.218579      2950.0  3703.071758
+UV_VISOR_RED                   4095.218579      2950.0  3703.071758
+UV_VISOR_YELLOW                4095.218579      2950.0  3703.071758
+TRANSLATOR_GRAPHITE_MIST       4095.218579      2950.0  3703.071758
+TRANSLATOR_SPACE_GRAY          4095.218579      2950.0  3703.071758
+TRANSLATOR_VOID_BLUE           4095.218579      2950.0  3703.071758
+UV_VISOR_AMBER                 4095.218579      2950.0  3703.071758
+UV_VISOR_MAGENTA               4095.218579      2950.0  3703.071758
+UV_VISOR_ORANGE                4095.218579      2950.0  3703.071758
+PEBBLES_L                      4656.298600      3200.0  4835.071444
+PEBBLES_XL                     4656.298600      3200.0  4835.071444
+PEBBLES_S                      4656.298600      3200.0  4835.071444
+PEBBLES_M                      4656.298600      3200.0  4835.071444
+PEBBLES_XS                     4656.298600      3200.0  4835.071444
+MICROCHIP_TRIANGLE             5266.021127      3850.0  5059.434097
+MICROCHIP_SQUARE               5266.021127      3850.0  5059.434097
+MICROCHIP_CIRCLE               5266.021127      3850.0  5059.434097
+MICROCHIP_RECTANGLE            5266.021127      3850.0  5059.434097
+MICROCHIP_OVAL                 5266.021127      3850.0  5059.434097
+
+── TOP 20 CORRELATED PAIRS (Returns) ──
+  SNACKPACK_PISTACHIO                      SNACKPACK_STRAWBERRY                     r=0.9126
+  SNACKPACK_PISTACHIO                      SNACKPACK_VANILLA                        r=0.0400
+  SNACKPACK_CHOCOLATE                      SNACKPACK_RASPBERRY                      r=0.0308
+  SNACKPACK_STRAWBERRY                     SNACKPACK_VANILLA                        r=0.0307
+  OXYGEN_SHAKE_MINT                        SNACKPACK_VANILLA                        r=0.0280
+  GALAXY_SOUNDS_PLANETARY_RINGS            SNACKPACK_PISTACHIO                      r=0.0254
+  SNACKPACK_CHOCOLATE                      SNACKPACK_PISTACHIO                      r=0.0247
+  ROBOT_MOPPING                            SNACKPACK_RASPBERRY                      r=0.0243
+  SNACKPACK_PISTACHIO                      UV_VISOR_RED                             r=0.0233
+  SNACKPACK_STRAWBERRY                     UV_VISOR_RED                             r=0.0232
+  SNACKPACK_PISTACHIO                      UV_VISOR_MAGENTA                         r=0.0231
+  SNACKPACK_PISTACHIO                      TRANSLATOR_ASTRO_BLACK                   r=0.0225
+  SNACKPACK_PISTACHIO                      UV_VISOR_ORANGE                          r=0.0220
+  OXYGEN_SHAKE_MORNING_BREATH              SNACKPACK_CHOCOLATE                      r=0.0218
+  GALAXY_SOUNDS_BLACK_HOLES                OXYGEN_SHAKE_EVENING_BREATH              r=0.0215
+  GALAXY_SOUNDS_SOLAR_WINDS                TRANSLATOR_GRAPHITE_MIST                 r=0.0215
+  SNACKPACK_CHOCOLATE                      UV_VISOR_RED                             r=0.0212
+  SNACKPACK_PISTACHIO                      TRANSLATOR_ECLIPSE_CHARCOAL              r=0.0211
+  SNACKPACK_STRAWBERRY                     UV_VISOR_MAGENTA                         r=0.0211
+  SNACKPACK_STRAWBERRY                     TRANSLATOR_ASTRO_BLACK                   r=0.0210
+
+── TOP 20 ANTI-CORRELATED PAIRS (Returns) ──
+  ROBOT_MOPPING                            SNACKPACK_STRAWBERRY                     r=-0.0108
+  PEBBLES_M                                SNACKPACK_CHOCOLATE                      r=-0.0110
+  PEBBLES_XS                               UV_VISOR_RED                             r=-0.0110
+  MICROCHIP_TRIANGLE                       SNACKPACK_CHOCOLATE                      r=-0.0112
+  MICROCHIP_SQUARE                         SLEEP_POD_NYLON                          r=-0.0118
+  MICROCHIP_OVAL                           OXYGEN_SHAKE_CHOCOLATE                   r=-0.0118
+  MICROCHIP_CIRCLE                         SLEEP_POD_POLYESTER                      r=-0.0119
+  MICROCHIP_RECTANGLE                      OXYGEN_SHAKE_MINT                        r=-0.0124
+  MICROCHIP_OVAL                           UV_VISOR_YELLOW                          r=-0.0131
+  PEBBLES_XS                               SNACKPACK_VANILLA                        r=-0.0138
+  PEBBLES_XS                               ROBOT_LAUNDRY                            r=-0.0152
+  GALAXY_SOUNDS_SOLAR_WINDS                PEBBLES_S                                r=-0.0169
+  PEBBLES_XS                               TRANSLATOR_VOID_BLUE                     r=-0.0178
+  PEBBLES_XL                               PEBBLES_XS                               r=-0.4751
+  PEBBLES_S                                PEBBLES_XL                               r=-0.4829
+  PEBBLES_L                                PEBBLES_XL                               r=-0.4932
+  PEBBLES_M                                PEBBLES_XL                               r=-0.5059
+  SNACKPACK_PISTACHIO                      SNACKPACK_RASPBERRY                      r=-0.8307
+  SNACKPACK_CHOCOLATE                      SNACKPACK_VANILLA                        r=-0.9152
+  SNACKPACK_RASPBERRY                      SNACKPACK_STRAWBERRY                     r=-0.9232
+
+── INTRA-GROUP RETURN CORRELATIONS (mean off-diagonal) ──
+  Galaxy Sounds        mean intra-corr = 0.0040
+  Sleep Pods           mean intra-corr = 0.0028
+  Microchips           mean intra-corr = 0.0062
+  Pebbles              mean intra-corr = -0.1913
+  Robots               mean intra-corr = -0.0008
+  UV Visors            mean intra-corr = 0.0060
+  Translators          mean intra-corr = 0.0045
+  Panels               mean intra-corr = 0.0045
+  Oxygen Shakes        mean intra-corr = 0.0070
+  Snack Packs          mean intra-corr = -0.1599

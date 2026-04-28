@@ -898,6 +898,8 @@ class LogVisualizer(QMainWindow):
         self._gen_pane_minimized = False
         self._backtest_runner = None
         self.trade_filters = {}
+        self._heatmap_cache = {}
+        self._order_heatmap_cache = {}
         # Disable OpenGL by default on Linux as it often causes rendering artifacts (gaps/missing pixels) in ImageItem
         use_gl = sys.platform != 'linux' 
         pg.setConfigOptions(useOpenGL=use_gl, imageAxisOrder='row-major')
@@ -1779,6 +1781,17 @@ class LogVisualizer(QMainWindow):
         for ts in all_ts: rows.append(','.join([str(int(ts))] + [str(ts_map[k].get(ts, '')) for k in custom]))
         with open(path, 'w') as f: f.write('\n'.join(rows))
 
+    def _pre_group_trades(self):
+        trades = self.data.get('trades', [])
+        trades_by_prod = {}
+        for tr in trades:
+            sym = tr.get('symbol', '')
+            if sym:
+                trades_by_prod.setdefault(sym, []).append(tr)
+        self.data['trades_by_prod'] = trades_by_prod
+        self._heatmap_cache.clear()
+        self._order_heatmap_cache.clear()
+
     def _import_data(self):
         data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
         if not os.path.exists(data_dir): return
@@ -1805,6 +1818,7 @@ class LogVisualizer(QMainWindow):
         df = df.drop_nulls(subset=['day', 'timestamp']).unique(subset=['day', 'timestamp', 'product'], keep='last').sort(['day', 'timestamp'])
         
         self.data = {'prices_df': df, 'trades': t_dicts, 'custom': {}, 'debug': [], 'orders': [], '_continuous_ts': _is_timestamps_continuous(df), '_min_day': df['day'].min() if 'day' in df.columns else 0}
+        self._pre_group_trades()
         self._custom_ts_arrays = {}
         self.trade_tag_map = {}
         self.cb_prod.blockSignals(True); products = df['product'].unique().sort().to_list()
@@ -1849,6 +1863,7 @@ class LogVisualizer(QMainWindow):
         self.sandbox_msgs = sandbox_msgs
         min_day = df['day'].min() if 'day' in df.columns else 0
         self.data = {'prices_df': df, 'trades': raw.get('tradeHistory', []), 'custom': custom, 'debug': debug_msgs, 'orders': orders, '_continuous_ts': _is_timestamps_continuous(df), '_min_day': min_day}
+        self._pre_group_trades()
         self._custom_ts_arrays = {name: np.array([p[0] for p in pts]) for name, pts in custom.items() if pts}
         self.trade_tag_map = self._build_trade_tag_map(orders)
         unique_tags = sorted({(o.get('tag') or '').strip() for o in orders if (o.get('tag') or '').strip()})
@@ -1922,8 +1937,8 @@ class LogVisualizer(QMainWindow):
     def _compute_position_series(self, t, prod, day, cont_ts, min_day, tags=None):
         """Return list of cumulative position values aligned to t array."""
         trade_events = []
-        for tr in self.data.get('trades', []):
-            if tr.get('symbol') != prod: continue
+        trades_by_prod = self.data.get('trades_by_prod', {})
+        for tr in trades_by_prod.get(prod, []):
             if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
             if not self._trade_matches_tag(tr, tags): continue
             if not self._trade_matches_filter(tr): continue
@@ -1978,8 +1993,8 @@ class LogVisualizer(QMainWindow):
     def _compute_valuation_pnl_aligned(self, t, prod, day, mid, cont_ts, min_day, tags):
         """Valuation PnL (cash + pos*mid) aligned to t, filtered by tag."""
         trade_events = []
-        for tr in self.data.get('trades', []):
-            if tr.get('symbol') != prod: continue
+        trades_by_prod = self.data.get('trades_by_prod', {})
+        for tr in trades_by_prod.get(prod, []):
             if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
             if not self._trade_matches_tag(tr, tags): continue
             if not self._trade_matches_filter(tr): continue
@@ -2031,14 +2046,14 @@ class LogVisualizer(QMainWindow):
                 ts_arr = sub.select(t_col).unique().sort(t_col)[t_col].to_numpy()
                 t_list = ts_arr.tolist()
                 combined = np.zeros(len(t_list))
+                trades_by_prod = self.data.get('trades_by_prod', {})
                 for ap in sub['product'].unique().to_list():
                     ap_mid = {}
                     if pnl_type == 'Valuation PnL':
                         ap_sub = sub.filter(pl.col('product') == ap)
                         ap_mid = dict(zip(ap_sub[t_col].to_list(), ap_sub['mid_price'].to_list()))
                     trade_events = []
-                    for tr in self.data['trades']:
-                        if tr.get('symbol') != ap: continue
+                    for tr in trades_by_prod.get(ap, []):
                         if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
                         if not self._trade_matches_tag(tr, tags): continue
                         if not self._trade_matches_filter(tr): continue
@@ -2076,8 +2091,8 @@ class LogVisualizer(QMainWindow):
             if pnl_type == 'Log PnL':
                 pnl_type = 'Valuation PnL'  # log PnL can't be split by tag; fall back to trade-based
             trade_events = []
-            for tr in self.data['trades']:
-                if tr.get('symbol') != pnl_prod: continue
+            trades_by_prod = self.data.get('trades_by_prod', {})
+            for tr in trades_by_prod.get(pnl_prod, []):
                 if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
                 if not self._trade_matches_tag(tr, tags): continue
                 if not self._trade_matches_filter(tr): continue
@@ -2122,8 +2137,8 @@ class LogVisualizer(QMainWindow):
         self.curve_pnl.setData(pnl_t, pnl_data)
 
         mb_t, mb_p, ms_t, ms_p, bot_raw = [], [], [], [], []
-        for tr in self.data['trades']:
-            if tr.get('symbol') != prod: continue
+        trades_by_prod = self.data.get('trades_by_prod', {})
+        for tr in trades_by_prod.get(prod, []):
             if day != 'All' and 'day' in tr and tr['day'] != int(day): continue
             if not self._trade_matches_filter(tr): continue
             ts = tr.get('timestamp', 0)
@@ -2145,13 +2160,26 @@ class LogVisualizer(QMainWindow):
             b_brushes.append(pg.mkBrush(TRADE_VOLUME_COLORS[pal_idx])); b_sizes.append(6 + buck * 2)
         self.sc_buy.setData(x=mb_t, y=mb_p); self.sc_sell.setData(x=ms_t, y=ms_p); self.sc_bot.setData(x=b_t, y=b_p, brush=b_brushes, size=b_sizes)
 
-        self.ob_res = build_ob_heatmap(self.data['prices_df'], prod, day, cont_ts, BUY_VOLUME_COLORS, SELL_VOLUME_COLORS)
+        cache_key = (prod, day)
+        if cache_key in self._heatmap_cache:
+            self.ob_res = self._heatmap_cache[cache_key]
+        else:
+            self.ob_res = build_ob_heatmap(self.data['prices_df'], prod, day, cont_ts, BUY_VOLUME_COLORS, SELL_VOLUME_COLORS)
+            self._heatmap_cache[cache_key] = self.ob_res
+
         if self.ob_res:
             self.img_item.setImage(self.ob_res['img'], autoLevels=False)
             self.img_item.setRect(get_rect(t, self.ob_res['levels']))
             self.img_item.setVisible(True)
-            filtered_orders = [o for o in self.data.get('orders', []) if not tags or ((o.get('tag') or '').strip() or 'Untagged') in tags]
-            o_res = build_order_placement_heatmap(filtered_orders, prod, day, t, cont_ts, min_day, ORDER_BUY_COLORS, ORDER_SELL_COLORS)
+            
+            order_cache_key = (prod, day, tuple(tags))
+            if order_cache_key in self._order_heatmap_cache:
+                o_res = self._order_heatmap_cache[order_cache_key]
+            else:
+                filtered_orders = [o for o in self.data.get('orders', []) if not tags or ((o.get('tag') or '').strip() or 'Untagged') in tags]
+                o_res = build_order_placement_heatmap(filtered_orders, prod, day, t, cont_ts, min_day, ORDER_BUY_COLORS, ORDER_SELL_COLORS)
+                self._order_heatmap_cache[order_cache_key] = o_res
+
             if o_res:
                 self.img_orders.setImage(o_res['img'], autoLevels=False)
                 self.img_orders.setRect(get_rect(t, o_res['levels']))
@@ -2251,16 +2279,19 @@ class LogVisualizer(QMainWindow):
         else:
             self.lbl_sharpe.setText("Sharpe Ratio: --")
             self.lbl_winrate.setText("Win Rate: --")
-        trades = self.data.get('trades', [])
+        
+        trades_by_prod = self.data.get('trades_by_prod', {})
         my_count = bot_count = total_vol = 0
-        for tr in trades:
-            if p != 'Overall' and tr.get('symbol') != p: continue
-            if d != 'All' and 'day' in tr and str(tr['day']) != d: continue
-            qty = abs(int(tr.get('quantity', 0)))
-            is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
-            is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
-            if is_b or is_s: my_count += 1; total_vol += qty
-            else: bot_count += 1; total_vol += qty
+        
+        target_prods = [p] if p != 'Overall' else list(trades_by_prod.keys())
+        for tp in target_prods:
+            for tr in trades_by_prod.get(tp, []):
+                if d != 'All' and 'day' in tr and str(tr['day']) != d: continue
+                qty = abs(int(tr.get('quantity', 0)))
+                is_b = str(tr.get('buyer', '')).upper() == 'SUBMISSION'
+                is_s = str(tr.get('seller', '')).upper() == 'SUBMISSION'
+                if is_b or is_s: my_count += 1; total_vol += qty
+                else: bot_count += 1; total_vol += qty
         self.lbl_volume.setText(f"Total Volume: {total_vol:,}")
         self.lbl_my_trades.setText(f"My Trades: {my_count}")
         self.lbl_bot_trades.setText(f"Bot Trades: {bot_count}")
