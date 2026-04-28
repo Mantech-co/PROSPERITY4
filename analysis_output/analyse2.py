@@ -533,7 +533,7 @@ for p in ALL_PRODUCTS:
 
 tc_df = pd.DataFrame(trade_counts, index=bins[:-1])
 tc_df = tc_df.T  # shape (50, T)
-tc_df_smooth = tc_df.rolling(50, axis=1).mean()
+tc_df_smooth = tc_df.T.rolling(50).mean().T
 
 fig, ax = plt.subplots(figsize=(24, 14))
 im = ax.imshow(tc_df_smooth.values, aspect="auto", cmap="hot",
