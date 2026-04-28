@@ -1001,7 +1001,7 @@ plt.close(fig)
 # ─────────────────────────────────────────────────────────────────────────────
 print("Plot 61: Spread vs volume ...")
 spread_mean2 = prices.groupby("product")["spread"].mean()
-vol_mean2 = vol_summary.set_index("product")["total_volume"]
+vol_mean2 = trades.groupby("product")["quantity"].sum().rename("total_volume")
 sv_df = pd.concat([spread_mean2, vol_mean2], axis=1).dropna()
 sv_df.columns = ["spread", "volume"]
 sv_df["group"] = sv_df.index.map(PRODUCT_TO_GROUP)
