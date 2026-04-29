@@ -1,20 +1,14 @@
 import json
-import math
-from typing import List, Dict, Any, Optional, Tuple
-from datamodel import OrderDepth, TradingState, Order, Trade
+from typing import List, Dict, Any, Optional
+from datamodel import OrderDepth, TradingState, Order
 
 # ── Strategy Parameters ─────────────────────────────────────────────────────
 
 TUNING_PARAMS = {
     "position_limit": 10,
-    "window_size": 40,        # Number of periods for rolling average/std
-    "z_entry_threshold": 2.0, # Z-score required to enter a position
-    "z_exit_threshold": 0.5,  # Z-score required to close a position
-    "hedge_ratio": 1.48        # Asset A moves 1.5x as much as Asset B (Update this based on your calculation)
 }
 
 class Logger:
-    """Logger with order-level trade attribution."""
     PREFIX = 'LOGVIZ:'
 
     def __init__(self, auto_print: bool = True):
@@ -41,7 +35,6 @@ class Logger:
         self._emit(self.PREFIX + json.dumps(clean, separators=(',', ':')))
 
     def log_order(self, product: str, side: str, price: int, qty: int, tag: str) -> None:
-        """Log an individual order placement for strategy-level trade attribution."""
         self._emit(f'LOGORDER:{product}:{side}:{price}:{qty}:{tag}')
 
     def debug(self, msg: str, tag: str = 'DBG', product: str = '') -> None:
@@ -53,182 +46,112 @@ class Logger:
         return out
 
 
-class PairsStrategy:
-    """Strategy for trading a correlated pair using bid-ask adjusted Z-score reversion."""
-    
-    def __init__(self, logger: Logger, params: Dict[str, Any], prod_a: str, prod_b: str):
+class BaseStrategy:
+    PRODUCT = ""
+
+    def __init__(self, logger: Logger, params: Dict[str, Any]):
         self.logger = logger
         self.params = params
-        self.prod_a = prod_a
-        self.prod_b = prod_b
-        
-        self.limit = params.get("position_limit", 20)
-        self.window_size = params.get("window_size", 40)
-        self.z_entry = params.get("z_entry_threshold", 2.0)
-        self.z_exit = params.get("z_exit_threshold", 0.5)
-        self.hedge_ratio = params.get("hedge_ratio", 1.0)
+        self.limit = params.get("position_limit", 10)
+        self.orders: List[Order] = []
+        self.state: Optional[TradingState] = None
+        self.order_depth: Optional[OrderDepth] = None
+        self.current_pos = 0
+        self.buy_capacity = 0
+        self.sell_capacity = 0
 
-    def _size_pair(self, max_qty_a: int, max_qty_b: int) -> Tuple[int, int]:
-        n = min(max_qty_a, self.limit)
-        while n > 0 and round(n * self.hedge_ratio) > max_qty_b:
-            n -= 1
-        return n, round(n * self.hedge_ratio)
+    def reset(self, state: TradingState):
+        self.state = state
+        self.order_depth = state.order_depths[self.PRODUCT]
+        self.orders = []
+        self.current_pos = int(state.position.get(self.PRODUCT, 0))
+        self.buy_capacity = self.limit - self.current_pos
+        self.sell_capacity = self.limit + self.current_pos
 
-    def run(self, state: TradingState, state_dict: Dict[str, Any]) -> Dict[str, List[Order]]:
-        orders: Dict[str, List[Order]] = {self.prod_a: [], self.prod_b: []}
+    def bid(self, price: int, quantity: int, tag: str = "MAKE"):
+        if quantity <= 0 or self.buy_capacity <= 0:
+            return
+        exec_qty = min(quantity, self.buy_capacity)
+        self.orders.append(Order(self.PRODUCT, int(price), exec_qty))
+        self.buy_capacity -= exec_qty
+        self.logger.log_order(self.PRODUCT, "BUY", int(price), exec_qty, tag)
 
-        # 1. Ensure we have order book data for both assets
-        if self.prod_a not in state.order_depths or self.prod_b not in state.order_depths:
-            return orders
+    def ask(self, price: int, quantity: int, tag: str = "MAKE"):
+        if quantity <= 0 or self.sell_capacity <= 0:
+            return
+        exec_qty = min(quantity, self.sell_capacity)
+        self.orders.append(Order(self.PRODUCT, int(price), -exec_qty))
+        self.sell_capacity -= exec_qty
+        self.logger.log_order(self.PRODUCT, "SELL", int(price), exec_qty, tag)
 
-        depth_a = state.order_depths[self.prod_a]
-        depth_b = state.order_depths[self.prod_b]
+    def _consolidate(self) -> List[Order]:
+        merged: Dict[int, int] = {}
+        for o in self.orders:
+            merged[o.price] = merged.get(o.price, 0) + o.quantity
+        return [Order(self.PRODUCT, price, qty) for price, qty in merged.items() if qty != 0]
 
-        # 2. Cannot trade if books are empty
-        if not depth_a.buy_orders or not depth_a.sell_orders or not depth_b.buy_orders or not depth_b.sell_orders:
-            return orders
+    def run(self, state_dict: Dict[str, Any]) -> List[Order]:
+        return []
 
-        # 3. Extract Best Prices
-        best_bid_a = max(depth_a.buy_orders.keys())
-        best_ask_a = min(depth_a.sell_orders.keys())
-        best_bid_b = max(depth_b.buy_orders.keys())
-        best_ask_b = min(depth_b.sell_orders.keys())
 
-        # 4. Calculate Mid Prices (For clean statistical tracking)
-        mid_a = (best_bid_a + best_ask_a) / 2.0
-        mid_b = (best_bid_b + best_ask_b) / 2.0
+class FullLongStrategy(BaseStrategy):
+    """Always drives position to +limit by hitting best ask."""
 
-        # Track the mid-price spread for our rolling statistics
-        mid_spread = mid_a - (self.hedge_ratio * mid_b)
+    def run(self, state_dict: Dict[str, Any]) -> List[Order]:
+        if not self.order_depth.sell_orders:
+            return []
+        best_ask = min(self.order_depth.sell_orders.keys())
+        self.bid(best_ask, self.buy_capacity, tag="LONG")
+        return self._consolidate()
 
-        # 5. Persist spread history
-        spread_history = state_dict.get("spread_history", [])
-        spread_history.append(mid_spread)
-        
-        if len(spread_history) > self.window_size:
-            spread_history.pop(0)
-            
-        state_dict["spread_history"] = spread_history
 
-        # Wait until we have enough data to calculate reliable Z-score
-        if len(spread_history) < self.window_size:
-            return orders
+class FullShortStrategy(BaseStrategy):
+    """Always drives position to -limit by hitting best bid."""
 
-        # 6. Calculate Rolling Statistics
-        mean = sum(spread_history) / len(spread_history)
-        variance = sum((x - mean) ** 2 for x in spread_history) / len(spread_history)
-        std_dev = math.sqrt(variance)
+    def run(self, state_dict: Dict[str, Any]) -> List[Order]:
+        if not self.order_depth.buy_orders:
+            return []
+        best_bid = max(self.order_depth.buy_orders.keys())
+        self.ask(best_bid, self.sell_capacity, tag="SHORT")
+        return self._consolidate()
 
-        if std_dev == 0:
-            return orders
 
-        # ─── BID-ASK ADJUSTED EXECUTION SPREADS ──────────────────────────────
+def make_long(product: str, logger: Logger, params: Dict[str, Any]) -> FullLongStrategy:
+    s = FullLongStrategy(logger, params)
+    s.PRODUCT = product
+    return s
 
-        # What spread do we actually get if we SHORT the pair? (Sell A at bid, Buy B at ask)
-        exec_short_spread = best_bid_a - (self.hedge_ratio * best_ask_b)
-        z_score_short = (exec_short_spread - mean) / std_dev
 
-        # What spread do we actually get if we LONG the pair? (Buy A at ask, Sell B at bid)
-        exec_long_spread = best_ask_a - (self.hedge_ratio * best_bid_b)
-        z_score_long = (exec_long_spread - mean) / std_dev
-
-        # Mid Z-Score for clean exits
-        mid_z_score = (mid_spread - mean) / std_dev
-
-        # Log to visualize in IMC visualizer
-        self.logger.log(
-            mid_spread=mid_spread, 
-            z_short=z_score_short, 
-            z_long=z_score_long
-        )
-
-        # Retrieve current positions
-        pos_a = int(state.position.get(self.prod_a, 0))
-        pos_b = int(state.position.get(self.prod_b, 0))
-
-        # ─── TRADING LOGIC ──────────────────────────────────────────────────
-
-        # 1. ENTRY LOGIC: Short A, Long B (Checking the harsh 'short' execution spread)
-        if z_score_short > self.z_entry:
-            max_short_a = self.limit + pos_a 
-            max_long_b = self.limit - pos_b
-            
-            trade_qty_a, trade_qty_b = self._size_pair(max_short_a, max_long_b)
-
-            if trade_qty_a > 0:
-                orders[self.prod_a].append(Order(self.prod_a, best_bid_a, -trade_qty_a))
-                orders[self.prod_b].append(Order(self.prod_b, best_ask_b, trade_qty_b))
-                
-                self.logger.debug(f"Entered Short Pair | Adjusted Z: {z_score_short:.2f}")
-
-        # 2. ENTRY LOGIC: Long A, Short B (Checking the harsh 'long' execution spread)
-        elif z_score_long < -self.z_entry:
-            max_long_a = self.limit - pos_a   
-            max_short_b = self.limit + pos_b  
-            
-            trade_qty_a, trade_qty_b = self._size_pair(max_long_a, max_short_b)
-
-            if trade_qty_a > 0:
-                orders[self.prod_a].append(Order(self.prod_a, best_ask_a, trade_qty_a))
-                orders[self.prod_b].append(Order(self.prod_b, best_bid_b, -trade_qty_b))
-                
-                self.logger.debug(f"Entered Long Pair | Adjusted Z: {z_score_long:.2f}")
-
-        # 3. EXIT LOGIC (Reversion to mean)
-        elif abs(mid_z_score) < self.z_exit:
-            flattened = False
-            if pos_a != 0:
-                price_a = best_ask_a if pos_a < 0 else best_bid_a
-                orders[self.prod_a].append(Order(self.prod_a, price_a, -pos_a))
-                flattened = True
-                
-            if pos_b != 0:
-                price_b = best_ask_b if pos_b < 0 else best_bid_b
-                orders[self.prod_b].append(Order(self.prod_b, price_b, -pos_b))
-                flattened = True
-
-            if flattened:
-                self.logger.debug(f"Pair Exit: Flattening positions | Mid Z: {mid_z_score:.2f}")
-
-        return orders
+def make_short(product: str, logger: Logger, params: Dict[str, Any]) -> FullShortStrategy:
+    s = FullShortStrategy(logger, params)
+    s.PRODUCT = product
+    return s
 
 
 class Trader:
     def __init__(self):
         self.logger = Logger()
         self.params = TUNING_PARAMS
-        
-        # Instantiate our pairs strategy
-        # NOTE: Replace 'ASSET_A' and 'ASSET_B' with actual product names
-        self.pairs_strategy = PairsStrategy(
-            logger=self.logger,
-            params=self.params,
-            prod_a="PEBBLES_XS",
-            prod_b="UV_VISOR_AMBER"
-        )
-        
-    def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], int, str]:
+        self.strategies: Dict[str, BaseStrategy] = {
+            "PEBBLES_XL":       make_long("PEBBLES_XL",       self.logger, self.params),
+            "MICROCHIP_SQUARE": make_long("MICROCHIP_SQUARE", self.logger, self.params),
+            "PEBBLES_XS":       make_short("PEBBLES_XS",       self.logger, self.params),
+            "MICROCHIP_OVAL":   make_short("MICROCHIP_OVAL",   self.logger, self.params),
+            "MICROCHIP_TRIANGLE": make_short("MICROCHIP_TRIANGLE", self.logger, self.params),
+        }
+
+    def run(self, state: TradingState):
         result: Dict[str, List[Order]] = {}
         trader_data = state.traderData if state.traderData else "{}"
-        
         try:
             state_dict = json.loads(trader_data)
         except Exception:
             state_dict = {}
 
-        # 1. Run the pairs strategy
-        pair_orders = self.pairs_strategy.run(state, state_dict)
-        
-        # 2. Add valid orders to the result dictionary
-        for prod, ord_list in pair_orders.items():
-            if ord_list:
-                result[prod] = ord_list
+        for product, strategy in self.strategies.items():
+            if product in state.order_depths:
+                strategy.reset(state)
+                result[product] = strategy.run(state_dict)
 
-        # 3. Re-encode the updated persistent state dictionary
         new_trader_data = json.dumps(state_dict)
-
-        # 4. Flush logger to print visualization outputs
-        self.logger.flush()
-        
-        # Return orders, conversions (always 0 unless specified), and new state
         return result, 0, new_trader_data
