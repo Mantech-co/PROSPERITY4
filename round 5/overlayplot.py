@@ -2,6 +2,7 @@
 """
 Usage:
   python overlayplot.py "EXPR1" "EXPR2" [--days 2 3 4] [--roll N] [--auto-lag]
+                        [--max-offset N] [--invert VALUE]
 
 Overlay two arbitrary mid-price expressions with interactive sliders.
 
@@ -10,14 +11,22 @@ Free variables:
   f2   - scalar in EXPR2, gets its own slider
 
 Overlay sliders (always present):
-  offset - shift EXPR2 in time (samples)
+  offset - shift EXPR2 in time (samples); range controlled by --max-offset
   scale  - multiply EXPR2 amplitude
   bias   - add constant to EXPR2
+
+Options:
+  --days 2 3 4     load specific days (default: all days found in data/)
+  --roll N         overlay rolling mean with window N
+  --auto-lag       initialise offset slider to peak cross-correlation lag
+  --max-offset N   half-range of offset slider and cross-corr panel (default: 2000)
+  --invert VALUE   invert expr2 about VALUE before overlaying; use 'mean' for nanmean
 
 Examples:
   "PEBBLES_L - f1 * PEBBLES_S"  "KELP"
   "COCONUT_COUPON / COCONUT"     "np.log(SQUID_INK)"
   "PEBBLES_L * f1 - PEBBLES_M"  "PEBBLES_S * f2"
+  "KELP" "SQUID_INK" --max-offset 5000 --auto-lag
 """
 
 import argparse
@@ -128,7 +137,7 @@ def main():
     parser.add_argument("expr2", help="second expression (may use f2)")
     parser.add_argument("--days", nargs="+", type=int, default=None)
     parser.add_argument("--roll", type=int, default=None)
-    parser.add_argument("--max-offset", type=int, default=500)
+    parser.add_argument("--max-offset", type=int, default=2000)
     parser.add_argument("--invert", default=None, metavar="VALUE",
                         help="invert expr2 about VALUE before overlaying: y = 2*VALUE - y  (use 'mean' for nanmean of expr2)")
     parser.add_argument("--auto-lag", action="store_true",

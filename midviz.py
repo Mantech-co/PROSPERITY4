@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QGroupBox,
 )
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont, QColor, QShortcut, QKeySequence
 
 # ── Constants ────────────────────────────────────────────────────────────────
 DATA_DIR = Path(__file__).parent / "data" / "round5"
@@ -173,6 +173,17 @@ def bollinger(y: np.ndarray, period: int, sigma: float) -> tuple[np.ndarray, np.
     lower = mid - sigma * std
     return upper, mid, lower
 
+def rolling_vol(y: np.ndarray, period: int) -> np.ndarray:
+    """Rolling historical volatility: std of log-returns over `period` bars."""
+    out = np.full(len(y), np.nan)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        lr = np.where(y[:-1] > 0, np.log(y[1:] / y[:-1]), np.nan)
+    for i in range(period - 1, len(lr)):
+        window = lr[i - period + 1:i + 1]
+        if np.isfinite(window).sum() >= 2:
+            out[i + 1] = float(np.nanstd(window))
+    return out
+
 # ── Expression eval (same as midplot.py) ─────────────────────────────────────
 def eval_expr(expr: str, pivot: pd.DataFrame) -> np.ndarray | None:
     if pivot is None or pivot.empty:
@@ -202,8 +213,8 @@ class Overlay:
         self.label = label
         self.color = color
         self.visible = True
-        # plot items attached to this overlay
         self.items: list[pg.PlotDataItem] = []
+        self.plot = None  # set to the PlotWidget that owns the items
 
 # ── Overlay row widget ────────────────────────────────────────────────────────
 class OverlayRow(QWidget):
@@ -280,6 +291,8 @@ class MidViz(QMainWindow):
         splitter.addWidget(self._build_center())
         splitter.addWidget(self._build_right_panel())
         splitter.setSizes([200, 1150, 250])
+
+        QShortcut(QKeySequence('Ctrl+L'), self).activated.connect(self._clear_all)
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
@@ -406,8 +419,8 @@ class MidViz(QMainWindow):
         tb_layout.addStretch()
 
         # Clear all
-        clear_btn = QPushButton('CLEAR ALL')
-        clear_btn.setFixedWidth(80)
+        clear_btn = QPushButton('CLEAR  Ctrl+L')
+        clear_btn.setFixedWidth(100)
         clear_btn.clicked.connect(self._clear_all)
         tb_layout.addWidget(clear_btn)
 
@@ -468,11 +481,25 @@ class MidViz(QMainWindow):
         self._ind_target.setStyleSheet(f'background:{PANEL_BG}; color:{TEXT}; border:1px solid {BORDER}; padding:2px 4px;')
         ind_layout.addWidget(self._ind_target)
 
+        # VOL
+        ind_layout.addWidget(self._vsep())
+        ind_layout.addWidget(self._ind_label('VOL'))
+        self._vol_period = self._spin(20, 2, 500)
+        ind_layout.addWidget(self._vol_period)
+        vol_btn = QPushButton('ADD')
+        vol_btn.setFixedWidth(44)
+        vol_btn.clicked.connect(self._add_vol)
+        ind_layout.addWidget(vol_btn)
+
         ind_layout.addStretch()
 
         layout.addWidget(ind_bar)
 
-        # Plot
+        # Vertical splitter: main plot on top, vol panel below
+        plot_splitter = QSplitter(Qt.Orientation.Vertical)
+        plot_splitter.setHandleWidth(3)
+
+        # Main plot
         self._plot = pg.PlotWidget()
         self._plot.setBackground(BG)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
@@ -480,7 +507,7 @@ class MidViz(QMainWindow):
         self._plot.getAxis('bottom').setTextPen(TEXT)
         self._plot.getAxis('left').setPen(BORDER)
         self._plot.getAxis('bottom').setPen(BORDER)
-        self._plot.setLabel('bottom', 'timestep', color=DIM)
+        self._plot.getAxis('bottom').setStyle(showValues=False)
 
         # Crosshair — ignoreBounds so they never affect autoscale
         self._vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(DIM, width=1, style=Qt.PenStyle.DotLine))
@@ -494,7 +521,57 @@ class MidViz(QMainWindow):
         self._plot.addItem(self._coord_label, ignoreBounds=True)
         self._plot.scene().sigMouseMoved.connect(self._on_mouse_move)
 
-        layout.addWidget(self._plot)
+        plot_splitter.addWidget(self._plot)
+
+        # Vol panel
+        self._vol_panel = QWidget()
+        self._vol_panel.setStyleSheet(f'background:{BG};')
+        vol_panel_layout = QVBoxLayout(self._vol_panel)
+        vol_panel_layout.setContentsMargins(0, 0, 0, 0)
+        vol_panel_layout.setSpacing(0)
+
+        vol_header = QWidget()
+        vol_header.setFixedHeight(22)
+        vol_header.setStyleSheet(f'background:{PANEL_BG}; border-top:1px solid {BORDER}; border-bottom:1px solid {BORDER};')
+        vol_hdr_layout = QHBoxLayout(vol_header)
+        vol_hdr_layout.setContentsMargins(8, 0, 8, 0)
+        vol_hdr_layout.setSpacing(6)
+        vol_title = QLabel('VOLATILITY  (rolling σ of log-returns)')
+        vol_title.setStyleSheet(f'color:{GOLD}; font-size:7.5pt; font-weight:bold;')
+        vol_hdr_layout.addWidget(vol_title)
+        vol_hdr_layout.addStretch()
+        vol_close = QToolButton()
+        vol_close.setText('✕')
+        vol_close.setFixedSize(16, 16)
+        vol_close.setStyleSheet(f'color:{DIM}; border:none; background:transparent;')
+        vol_close.clicked.connect(lambda: self._vol_panel.setVisible(False))
+        vol_hdr_layout.addWidget(vol_close)
+        vol_panel_layout.addWidget(vol_header)
+
+        self._vol_plot = pg.PlotWidget()
+        self._vol_plot.setBackground(BG)
+        self._vol_plot.showGrid(x=True, y=True, alpha=0.15)
+        self._vol_plot.getAxis('left').setTextPen(TEXT)
+        self._vol_plot.getAxis('bottom').setTextPen(TEXT)
+        self._vol_plot.getAxis('left').setPen(BORDER)
+        self._vol_plot.getAxis('bottom').setPen(BORDER)
+        self._vol_plot.setLabel('bottom', 'timestep', color=DIM)
+        self._vol_plot.setXLink(self._plot)
+        self._vol_plot.scene().sigMouseMoved.connect(self._on_mouse_move_vol)
+        vol_panel_layout.addWidget(self._vol_plot)
+
+        # Vol crosshair
+        self._vol_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(DIM, width=1, style=Qt.PenStyle.DotLine))
+        self._vol_vline.setVisible(False)
+        self._vol_plot.addItem(self._vol_vline, ignoreBounds=True)
+
+        self._vol_panel.setVisible(False)
+        plot_splitter.addWidget(self._vol_panel)
+        plot_splitter.setSizes([700, 200])
+        plot_splitter.setStretchFactor(0, 3)
+        plot_splitter.setStretchFactor(1, 1)
+
+        layout.addWidget(plot_splitter)
 
         # Status bar
         self._status = QLabel('  ready')
@@ -600,6 +677,7 @@ class MidViz(QMainWindow):
         x = self._x if self._x is not None else np.arange(len(y))
         curve = self._plot.plot(x, y, pen=pen, name=label)
         ov.items.append(curve)
+        ov.plot = self._plot
         self._overlays.append(ov)
 
         # Row in right panel
@@ -627,6 +705,7 @@ class MidViz(QMainWindow):
         self._plot.addItem(fill)
 
         ov.items = [c_mid, c_up, c_lo, fill]
+        ov.plot = self._plot
         self._overlays.append(ov)
 
         row = OverlayRow(ov, self._toggle_overlay, self._remove_overlay)
@@ -645,8 +724,9 @@ class MidViz(QMainWindow):
             row.set_visible(ov.visible)
 
     def _remove_overlay(self, ov: Overlay):
+        target = ov.plot or self._plot
         for item in ov.items:
-            self._plot.removeItem(item)
+            target.removeItem(item)
         self._overlays.remove(ov)
         row = self._overlay_rows.pop(ov.id, None)
         if row:
@@ -656,8 +736,9 @@ class MidViz(QMainWindow):
 
     def _clear_all(self):
         for ov in list(self._overlays):
+            target = ov.plot or self._plot
             for item in ov.items:
-                self._plot.removeItem(item)
+                target.removeItem(item)
             row = self._overlay_rows.pop(ov.id, None)
             if row:
                 row.setParent(None)
@@ -667,11 +748,11 @@ class MidViz(QMainWindow):
         self._update_ind_target()
 
     def _refresh_all_overlays(self):
-        # Re-evaluate and replot all existing overlays (e.g. after day change)
         to_remove = list(self._overlays)
         for ov in to_remove:
+            target = ov.plot or self._plot
             for item in ov.items:
-                self._plot.removeItem(item)
+                target.removeItem(item)
             row = self._overlay_rows.pop(ov.id, None)
             if row:
                 row.setParent(None)
@@ -749,6 +830,31 @@ class MidViz(QMainWindow):
         color = self._next_color()
         self._add_bb_overlay(f'BB({p},{sig}) {base_label}', upper, mid, lower, color)
 
+    def _add_vol(self):
+        y = self._get_target_y()
+        if y is None:
+            self._status.setText('  no base overlay selected')
+            return
+        p = self._vol_period.value()
+        base_label = self._ind_target.currentText()
+        vol = rolling_vol(y, p)
+        color = self._next_color()
+        x = self._x if self._x is not None else np.arange(len(vol))
+        pen = pg.mkPen(color, width=1.5)
+        curve = self._vol_plot.plot(x, vol, pen=pen, name=f'VOL({p}) {base_label}')
+        # Track in overlay list so clear-all removes it
+        ov = Overlay(f'VOL({p}) {base_label}', color)
+        ov.items.append(curve)
+        ov.plot = self._vol_plot
+        self._overlays.append(ov)
+        row = OverlayRow(ov, self._toggle_overlay, self._remove_overlay)
+        self._overlay_list_layout.addWidget(row)
+        self._overlay_rows[ov.id] = row
+        self._update_ind_target()
+        # Show vol panel if hidden
+        if not self._vol_panel.isVisible():
+            self._vol_panel.setVisible(True)
+
     # ── Crosshair ─────────────────────────────────────────────────────────────
     def _on_mouse_move(self, pos):
         in_plot = self._plot.sceneBoundingRect().contains(pos)
@@ -762,6 +868,18 @@ class MidViz(QMainWindow):
         self._hline.setPos(pt.y())
         self._coord_label.setPos(pt.x(), pt.y())
         self._coord_label.setText(f'  t={int(pt.x())}  y={pt.y():.4f}')
+        # Sync vol crosshair
+        self._vol_vline.setPos(pt.x())
+
+    def _on_mouse_move_vol(self, pos):
+        in_plot = self._vol_plot.sceneBoundingRect().contains(pos)
+        self._vol_vline.setVisible(in_plot)
+        if not in_plot:
+            return
+        pt = self._vol_plot.plotItem.vb.mapSceneToView(pos)
+        self._vol_vline.setPos(pt.x())
+        # Sync main crosshair x position
+        self._vline.setPos(pt.x())
 
 
 def main():
