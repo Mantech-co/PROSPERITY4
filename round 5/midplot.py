@@ -20,6 +20,7 @@ import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.widgets as mwidgets
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent / "../data"
@@ -59,7 +60,14 @@ def find_products(expr: str, available: list[str]) -> list[str]:
     return found
 
 
-def eval_expr(expr: str, pivot: pd.DataFrame) -> pd.Series:
+def has_free_f(expr: str, products: list[str]) -> bool:
+    test = expr
+    for p in sorted(products, key=len, reverse=True):
+        test = test.replace(p, "")
+    return bool(re.search(r'\bf\b', test))
+
+
+def eval_expr(expr: str, pivot: pd.DataFrame, f: float = 1.0) -> pd.Series:
     products = find_products(expr, list(pivot.columns))
     if not products:
         sys.exit(f"no products found in expression: {expr}")
@@ -79,6 +87,7 @@ def eval_expr(expr: str, pivot: pd.DataFrame) -> pd.Series:
         mapping[safe] = ns[p]
 
     mapping["np"] = np
+    mapping["f"] = f
     try:
         result = eval(safe_expr, {"__builtins__": {}}, mapping)
     except Exception as e:
@@ -110,19 +119,25 @@ def main():
     pivot = pivot_mid(df)
     print(f"products: {sorted(pivot.columns.tolist())}")
 
-    series = eval_expr(args.expr, pivot)
+    products = find_products(args.expr, list(pivot.columns))
+    use_slider = has_free_f(args.expr, products)
+    init_f = 1.0
+
+    series = eval_expr(args.expr, pivot, f=init_f)
 
     # x axis: flatten multi-index to sequential integers
     x = np.arange(len(series))
     y = series.values.astype(float)
 
+    bottom_margin = 0.18 if use_slider else 0.08
     fig, ax = plt.subplots(figsize=(14, 5))
+    fig.subplots_adjust(bottom=bottom_margin)
 
-    ax.plot(x, y, lw=0.8, alpha=0.6, color="steelblue", label="raw")
-
+    (line_raw,) = ax.plot(x, y, lw=0.8, alpha=0.6, color="steelblue", label="raw")
+    line_roll = None
     if args.roll:
         rolled = pd.Series(y).rolling(args.roll, min_periods=1).mean().values
-        ax.plot(x, rolled, lw=1.5, color="tomato", label=f"roll({args.roll})")
+        (line_roll,) = ax.plot(x, rolled, lw=1.5, color="tomato", label=f"roll({args.roll})")
         ax.legend()
 
     # day boundary lines
@@ -137,7 +152,24 @@ def main():
     ax.set_title(title)
     ax.set_xlabel("timestep")
     ax.set_ylabel("value")
-    plt.tight_layout()
+
+    if use_slider:
+        ax_slider = fig.add_axes([0.15, 0.04, 0.7, 0.03])
+        slider = mwidgets.Slider(ax_slider, "f", 0.0, 5.0, valinit=init_f, valstep=0.01)
+
+        def on_slide(val):
+            new_y = eval_expr(args.expr, pivot, f=slider.val).values.astype(float)
+            line_raw.set_ydata(new_y)
+            if line_roll is not None:
+                rolled = pd.Series(new_y).rolling(args.roll, min_periods=1).mean().values
+                line_roll.set_ydata(rolled)
+            ax.relim()
+            ax.autoscale_view()
+            fig.canvas.draw_idle()
+
+        slider.on_changed(on_slide)
+        fig._slider_ref = slider  # keep reference so GC doesn't kill it
+
     plt.show()
 
 

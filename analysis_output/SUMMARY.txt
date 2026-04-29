@@ -248,3 +248,13 @@ MICROCHIP_OVAL                 5266.021127      3850.0  5059.434097
   Panels               mean intra-corr = 0.0045
   Oxygen Shakes        mean intra-corr = 0.0070
   Snack Packs          mean intra-corr = -0.1599
+
+── PEBBLES HEDGE RATIOS (XL as hedge instrument) ──
+  Hedge: R_i ≈ α + β·R_XL  →  long 1 pebble_i, long |β| XL to neutralise XL-factor
+  β_adj = user-adjusted slope; β_ols = OLS slope
+
+  Prod       β_ols       β_adj   hedge_ratio         r
+  XS       -0.4311     -0.7197        0.7197   -0.4751
+  S        -0.3491     -0.5019        0.5019   -0.4829
+  M        -0.3183     -0.4356        0.4356   -0.5059
+  L        -0.3106     -0.4735        0.4735   -0.4932

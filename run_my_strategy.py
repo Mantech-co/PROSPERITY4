@@ -26,7 +26,7 @@ if __name__ == "__main__":
     try:
         run_backtest(
             trader_class=Trader,
-            round_day=["4-2"],
+            round_day=["5-2", "5-3", "5-4"],
             data_dir=project_root / "data",
             print_output=False,
         )

@@ -1,199 +1,234 @@
 import json
 import math
-from typing import List, Dict, Optional
-from datamodel import OrderDepth, TradingState, Order
+from typing import List, Dict, Any, Optional, Tuple
+from datamodel import OrderDepth, TradingState, Order, Trade
 
-UNDERLYING = "VELVETFRUIT_EXTRACT"
-STRIKES: Dict[str, int] = {
-    "VEV_4000": 4000,
-    "VEV_4500": 4500,
-    "VEV_5000": 5000,
-    "VEV_5100": 5100,
-    "VEV_5200": 5200,
-    "VEV_5300": 5300,
-    "VEV_5400": 5400,
-    "VEV_5500": 5500,
-    "VEV_6000": 6000,
-    "VEV_6500": 6500,
+# ── Strategy Parameters ─────────────────────────────────────────────────────
+
+TUNING_PARAMS = {
+    "position_limit": 10,
+    "window_size": 40,        # Number of periods for rolling average/std
+    "z_entry_threshold": 2.0, # Z-score required to enter a position
+    "z_exit_threshold": 0.5,  # Z-score required to close a position
+    "hedge_ratio": 1.48        # Asset A moves 1.5x as much as Asset B (Update this based on your calculation)
 }
-
-SHORT_SYMS = ["VEV_5200", "VEV_5300"]   # sell to -limit
-LONG_SYMS  = ["VEV_5400", "VEV_5500"]   # buy to +limit (delta offset)
-
-_DEFAULTS = {
-    "option_limit":     300,
-    "underlying_limit": 200,
-    "sigma":            0.20,
-    "r":                0.0,
-    "total_expiry_days": 8,
-    "start_day":        2,
-    "rebalance_ticks":  100,
-}
-
-TS_PER_DAY = 1_000_000
-
-
-def _load_params() -> dict:
-    import os
-    path = os.path.join(os.path.dirname(__file__), "params.json")
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return {**_DEFAULTS, **data}
-    except Exception:
-        return dict(_DEFAULTS)
-
-
-TUNING_PARAMS = _load_params()
-
-
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def bs_delta(S: float, K: float, r: float, sigma: float, T: float) -> float:
-    if T <= 0 or sigma <= 0 or S <= 0:
-        return 1.0 if S > K else 0.0
-    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-    return _norm_cdf(d1)
-
 
 class Logger:
-    PREFIX = "LOGVIZ:"
+    """Logger with order-level trade attribution."""
+    PREFIX = 'LOGVIZ:'
+
+    def __init__(self, auto_print: bool = True):
+        self._auto_print = auto_print
+        self._buffer: list[str] = []
+
+    def _emit(self, line: str) -> None:
+        if self._auto_print:
+            print(line)
+        else:
+            self._buffer.append(line)
 
     def log(self, **series: float) -> None:
-        clean = {k: float(v) for k, v in series.items() if v == v}
-        if clean:
-            print(self.PREFIX + json.dumps(clean, separators=(",", ":")))
+        if not series:
+            return
+        clean: dict[str, float] = {}
+        for k, v in series.items():
+            try:
+                clean[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+        if not clean:
+            return
+        self._emit(self.PREFIX + json.dumps(clean, separators=(',', ':')))
 
     def log_order(self, product: str, side: str, price: int, qty: int, tag: str) -> None:
-        print(f"LOGORDER:{product}:{side}:{price}:{qty}:{tag}")
+        """Log an individual order placement for strategy-level trade attribution."""
+        self._emit(f'LOGORDER:{product}:{side}:{price}:{qty}:{tag}')
+
+    def debug(self, msg: str, tag: str = 'DBG', product: str = '') -> None:
+        self._emit(f'LOGDBG:{tag}:{product}:{msg}')
+
+    def flush(self) -> str:
+        out = '\n'.join(self._buffer)
+        self._buffer.clear()
+        return out
 
 
-class CondorDeltaHedge:
-    def __init__(self, logger: Logger, params: dict):
+class PairsStrategy:
+    """Strategy for trading a correlated pair using bid-ask adjusted Z-score reversion."""
+    
+    def __init__(self, logger: Logger, params: Dict[str, Any], prod_a: str, prod_b: str):
         self.logger = logger
-        self.p = params
+        self.params = params
+        self.prod_a = prod_a
+        self.prod_b = prod_b
+        
+        self.limit = params.get("position_limit", 20)
+        self.window_size = params.get("window_size", 40)
+        self.z_entry = params.get("z_entry_threshold", 2.0)
+        self.z_exit = params.get("z_exit_threshold", 0.5)
+        self.hedge_ratio = params.get("hedge_ratio", 1.0)
 
-    def _mid(self, od: OrderDepth) -> Optional[float]:
-        bb = max(od.buy_orders)  if od.buy_orders  else None
-        ba = min(od.sell_orders) if od.sell_orders else None
-        if bb is None or ba is None:
-            return None
-        return (bb + ba) / 2.0
+    def _size_pair(self, max_qty_a: int, max_qty_b: int) -> Tuple[int, int]:
+        n = min(max_qty_a, self.limit)
+        while n > 0 and round(n * self.hedge_ratio) > max_qty_b:
+            n -= 1
+        return n, round(n * self.hedge_ratio)
 
-    def _tte(self, ts: dict, timestamp: int) -> float:
-        prev = ts.get("prev_ts", -1)
-        day  = ts.get("day", self.p["start_day"])
-        if 0 <= timestamp < prev:
-            day += 1
-            ts["day"] = day
-        ts["prev_ts"] = timestamp
-        tte_days = max(self.p["total_expiry_days"] - day - timestamp / TS_PER_DAY, 1e-9)
-        return tte_days / 252.0
+    def run(self, state: TradingState, state_dict: Dict[str, Any]) -> Dict[str, List[Order]]:
+        orders: Dict[str, List[Order]] = {self.prod_a: [], self.prod_b: []}
 
-    def _sweep_buy(self, sym: str, od: OrderDepth, want: int) -> List[Order]:
-        orders, rem = [], want
-        for price in sorted(od.sell_orders):
-            if rem <= 0:
-                break
-            qty = min(rem, -od.sell_orders[price])
-            orders.append(Order(sym, price, qty))
-            self.logger.log_order(sym, "BUY", price, qty, "FILL")
-            rem -= qty
+        # 1. Ensure we have order book data for both assets
+        if self.prod_a not in state.order_depths or self.prod_b not in state.order_depths:
+            return orders
+
+        depth_a = state.order_depths[self.prod_a]
+        depth_b = state.order_depths[self.prod_b]
+
+        # 2. Cannot trade if books are empty
+        if not depth_a.buy_orders or not depth_a.sell_orders or not depth_b.buy_orders or not depth_b.sell_orders:
+            return orders
+
+        # 3. Extract Best Prices
+        best_bid_a = max(depth_a.buy_orders.keys())
+        best_ask_a = min(depth_a.sell_orders.keys())
+        best_bid_b = max(depth_b.buy_orders.keys())
+        best_ask_b = min(depth_b.sell_orders.keys())
+
+        # 4. Calculate Mid Prices (For clean statistical tracking)
+        mid_a = (best_bid_a + best_ask_a) / 2.0
+        mid_b = (best_bid_b + best_ask_b) / 2.0
+
+        # Track the mid-price spread for our rolling statistics
+        mid_spread = mid_a - (self.hedge_ratio * mid_b)
+
+        # 5. Persist spread history
+        spread_history = state_dict.get("spread_history", [])
+        spread_history.append(mid_spread)
+        
+        if len(spread_history) > self.window_size:
+            spread_history.pop(0)
+            
+        state_dict["spread_history"] = spread_history
+
+        # Wait until we have enough data to calculate reliable Z-score
+        if len(spread_history) < self.window_size:
+            return orders
+
+        # 6. Calculate Rolling Statistics
+        mean = sum(spread_history) / len(spread_history)
+        variance = sum((x - mean) ** 2 for x in spread_history) / len(spread_history)
+        std_dev = math.sqrt(variance)
+
+        if std_dev == 0:
+            return orders
+
+        # ─── BID-ASK ADJUSTED EXECUTION SPREADS ──────────────────────────────
+
+        # What spread do we actually get if we SHORT the pair? (Sell A at bid, Buy B at ask)
+        exec_short_spread = best_bid_a - (self.hedge_ratio * best_ask_b)
+        z_score_short = (exec_short_spread - mean) / std_dev
+
+        # What spread do we actually get if we LONG the pair? (Buy A at ask, Sell B at bid)
+        exec_long_spread = best_ask_a - (self.hedge_ratio * best_bid_b)
+        z_score_long = (exec_long_spread - mean) / std_dev
+
+        # Mid Z-Score for clean exits
+        mid_z_score = (mid_spread - mean) / std_dev
+
+        # Log to visualize in IMC visualizer
+        self.logger.log(
+            mid_spread=mid_spread, 
+            z_short=z_score_short, 
+            z_long=z_score_long
+        )
+
+        # Retrieve current positions
+        pos_a = int(state.position.get(self.prod_a, 0))
+        pos_b = int(state.position.get(self.prod_b, 0))
+
+        # ─── TRADING LOGIC ──────────────────────────────────────────────────
+
+        # 1. ENTRY LOGIC: Short A, Long B (Checking the harsh 'short' execution spread)
+        if z_score_short > self.z_entry:
+            max_short_a = self.limit + pos_a 
+            max_long_b = self.limit - pos_b
+            
+            trade_qty_a, trade_qty_b = self._size_pair(max_short_a, max_long_b)
+
+            if trade_qty_a > 0:
+                orders[self.prod_a].append(Order(self.prod_a, best_bid_a, -trade_qty_a))
+                orders[self.prod_b].append(Order(self.prod_b, best_ask_b, trade_qty_b))
+                
+                self.logger.debug(f"Entered Short Pair | Adjusted Z: {z_score_short:.2f}")
+
+        # 2. ENTRY LOGIC: Long A, Short B (Checking the harsh 'long' execution spread)
+        elif z_score_long < -self.z_entry:
+            max_long_a = self.limit - pos_a   
+            max_short_b = self.limit + pos_b  
+            
+            trade_qty_a, trade_qty_b = self._size_pair(max_long_a, max_short_b)
+
+            if trade_qty_a > 0:
+                orders[self.prod_a].append(Order(self.prod_a, best_ask_a, trade_qty_a))
+                orders[self.prod_b].append(Order(self.prod_b, best_bid_b, -trade_qty_b))
+                
+                self.logger.debug(f"Entered Long Pair | Adjusted Z: {z_score_long:.2f}")
+
+        # 3. EXIT LOGIC (Reversion to mean)
+        elif abs(mid_z_score) < self.z_exit:
+            flattened = False
+            if pos_a != 0:
+                price_a = best_ask_a if pos_a < 0 else best_bid_a
+                orders[self.prod_a].append(Order(self.prod_a, price_a, -pos_a))
+                flattened = True
+                
+            if pos_b != 0:
+                price_b = best_ask_b if pos_b < 0 else best_bid_b
+                orders[self.prod_b].append(Order(self.prod_b, price_b, -pos_b))
+                flattened = True
+
+            if flattened:
+                self.logger.debug(f"Pair Exit: Flattening positions | Mid Z: {mid_z_score:.2f}")
+
         return orders
-
-    def _sweep_sell(self, sym: str, od: OrderDepth, want: int) -> List[Order]:
-        orders, rem = [], want
-        for price in sorted(od.buy_orders, reverse=True):
-            if rem <= 0:
-                break
-            qty = min(rem, od.buy_orders[price])
-            orders.append(Order(sym, price, -qty))
-            self.logger.log_order(sym, "SELL", price, qty, "FILL")
-            rem -= qty
-        return orders
-
-    def run(self, state: TradingState, ts: dict) -> Dict[str, List[Order]]:
-        result: Dict[str, List[Order]] = {}
-
-        und_od = state.order_depths.get(UNDERLYING)
-        if und_od is None:
-            return result
-        S = self._mid(und_od)
-        if S is None:
-            return result
-
-        tte   = self._tte(ts, state.timestamp)
-        sigma = self.p["sigma"]
-        r     = self.p["r"]
-        olim  = self.p["option_limit"]
-        ulim  = self.p["underlying_limit"]
-
-        # 1. sell ATM calls (5200, 5300) to -limit
-        for sym in SHORT_SYMS:
-            od = state.order_depths.get(sym)
-            if od is None or not od.buy_orders:
-                continue
-            pos  = int(state.position.get(sym, 0))
-            need = olim + pos              # units still shortable
-            if need <= 0:
-                continue
-            orders = self._sweep_sell(sym, od, need)
-            if orders:
-                result[sym] = orders
-
-        # 2. buy OTM calls (5400, 5500) to +limit
-        for sym in LONG_SYMS:
-            od = state.order_depths.get(sym)
-            if od is None or not od.sell_orders:
-                continue
-            pos  = int(state.position.get(sym, 0))
-            need = olim - pos              # units still buyable
-            if need <= 0:
-                continue
-            orders = self._sweep_buy(sym, od, need)
-            if orders:
-                result[sym] = orders
-
-        # 3. rebalance underlying to complete delta neutral
-        tick = ts.get("tick", 0)
-        ts["tick"] = tick + 1
-        if tick % self.p["rebalance_ticks"] == 0:
-            net_delta = 0.0
-            for sym in SHORT_SYMS + LONG_SYMS:
-                K   = STRIKES[sym]
-                pos = int(state.position.get(sym, 0))
-                net_delta += pos * bs_delta(S, K, r, sigma, tte)
-
-            target_und = max(-ulim, min(ulim, -round(net_delta)))
-            und_pos    = int(state.position.get(UNDERLYING, 0))
-            diff       = target_und - und_pos
-            if diff > 0:
-                orders = self._sweep_buy(UNDERLYING, und_od, diff)
-                if orders:
-                    result[UNDERLYING] = orders
-            elif diff < 0:
-                orders = self._sweep_sell(UNDERLYING, und_od, -diff)
-                if orders:
-                    result[UNDERLYING] = orders
-
-            self.logger.log(S=S, net_delta=net_delta, und_pos=und_pos,
-                            target_und=target_und, tte=tte)
-
-        return result
 
 
 class Trader:
     def __init__(self):
-        self.logger   = Logger()
-        self.strategy = CondorDeltaHedge(self.logger, TUNING_PARAMS)
-
-    def run(self, state: TradingState):
+        self.logger = Logger()
+        self.params = TUNING_PARAMS
+        
+        # Instantiate our pairs strategy
+        # NOTE: Replace 'ASSET_A' and 'ASSET_B' with actual product names
+        self.pairs_strategy = PairsStrategy(
+            logger=self.logger,
+            params=self.params,
+            prod_a="PEBBLES_XS",
+            prod_b="UV_VISOR_AMBER"
+        )
+        
+    def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], int, str]:
+        result: Dict[str, List[Order]] = {}
+        trader_data = state.traderData if state.traderData else "{}"
+        
         try:
-            ts = json.loads(state.traderData) if state.traderData else {}
+            state_dict = json.loads(trader_data)
         except Exception:
-            ts = {}
+            state_dict = {}
 
-        result = self.strategy.run(state, ts)
-        return result, 0, json.dumps(ts)
+        # 1. Run the pairs strategy
+        pair_orders = self.pairs_strategy.run(state, state_dict)
+        
+        # 2. Add valid orders to the result dictionary
+        for prod, ord_list in pair_orders.items():
+            if ord_list:
+                result[prod] = ord_list
+
+        # 3. Re-encode the updated persistent state dictionary
+        new_trader_data = json.dumps(state_dict)
+
+        # 4. Flush logger to print visualization outputs
+        self.logger.flush()
+        
+        # Return orders, conversions (always 0 unless specified), and new state
+        return result, 0, new_trader_data
