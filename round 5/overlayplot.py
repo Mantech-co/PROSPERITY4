@@ -129,8 +129,8 @@ def main():
     parser.add_argument("--days", nargs="+", type=int, default=None)
     parser.add_argument("--roll", type=int, default=None)
     parser.add_argument("--max-offset", type=int, default=500)
-    parser.add_argument("--invert", type=float, default=None, metavar="VALUE",
-                        help="invert expr2 about VALUE before overlaying: y = 2*VALUE - y")
+    parser.add_argument("--invert", default=None, metavar="VALUE",
+                        help="invert expr2 about VALUE before overlaying: y = 2*VALUE - y  (use 'mean' for nanmean of expr2)")
     parser.add_argument("--auto-lag", action="store_true",
                         help="init offset to peak cross-correlation lag")
     args = parser.parse_args()
@@ -178,7 +178,15 @@ def main():
     )
     fig.subplots_adjust(bottom=bottom_margin, hspace=0.35)
 
-    invert_val = args.invert
+    if args.invert is None:
+        invert_val = None
+    elif args.invert.lower() == "mean":
+        invert_val = np.nanmean(y2)
+    else:
+        try:
+            invert_val = float(args.invert)
+        except ValueError:
+            sys.exit(f"--invert: expected a number or 'mean', got '{args.invert}'")
 
     def make_y2t(offset, scale, bias):
         base = 2 * invert_val - y2 if invert_val is not None else y2
