@@ -129,6 +129,8 @@ def main():
     parser.add_argument("--days", nargs="+", type=int, default=None)
     parser.add_argument("--roll", type=int, default=None)
     parser.add_argument("--max-offset", type=int, default=500)
+    parser.add_argument("--invert", type=float, default=None, metavar="VALUE",
+                        help="invert expr2 about VALUE before overlaying: y = 2*VALUE - y")
     parser.add_argument("--auto-lag", action="store_true",
                         help="init offset to peak cross-correlation lag")
     args = parser.parse_args()
@@ -176,8 +178,11 @@ def main():
     )
     fig.subplots_adjust(bottom=bottom_margin, hspace=0.35)
 
+    invert_val = args.invert
+
     def make_y2t(offset, scale, bias):
-        return apply_offset(y2, int(round(offset))) * scale + bias
+        base = 2 * invert_val - y2 if invert_val is not None else y2
+        return apply_offset(base, int(round(offset))) * scale + bias
 
     y2t = make_y2t(init_offset, init_scale, init_bias)
 
@@ -204,8 +209,9 @@ def main():
     # cross-correlation panel
     max_lag = args.max_offset
     lags = np.arange(-max_lag, max_lag + 1)
+    y2_base = 2 * invert_val - y2 if invert_val is not None else y2
     a = np.nan_to_num(y1 - np.nanmean(y1))
-    b = np.nan_to_num(y2 - np.nanmean(y2))
+    b = np.nan_to_num(y2_base - np.nanmean(y2_base))
     corr_full = correlate(a, b, mode="full")
     center = len(a) - 1
     corr_slice = corr_full[center - max_lag: center + max_lag + 1]
@@ -270,8 +276,9 @@ def main():
         sl_f2 = mwidgets.Slider(ax_f2, "f2  (expr2)", 0.0, 5.0, valinit=1.0, valstep=0.001)
 
     def recompute_corr():
+        b_raw = 2 * invert_val - y2 if invert_val is not None else y2
         a_ = np.nan_to_num(y1 - np.nanmean(y1))
-        b_ = np.nan_to_num(y2 - np.nanmean(y2))
+        b_ = np.nan_to_num(b_raw - np.nanmean(b_raw))
         cf = correlate(a_, b_, mode="full")
         cs = cf[center - max_lag: center + max_lag + 1]
         cn = cs / (np.max(np.abs(cs)) + 1e-12)
