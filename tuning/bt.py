@@ -144,6 +144,9 @@ def run(params=None):
         print(f"day {day}: pnl={day_pnl:+.0f}  cumulative={sum(cash.values()):.0f}  pos={dict(positions)}")
 
     print(f"\ntotal cash: {sum(cash.values()):.0f}")
+    print("\nper-product cash:")
+    for sym, val in sorted(cash.items(), key=lambda x: -x[1]):
+        print(f"  {sym:<35} {val:+,.0f}")
     print("final positions:", {k: v for k, v in positions.items() if v != 0})
     return sum(cash.values())
 

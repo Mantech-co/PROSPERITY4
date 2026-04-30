@@ -20,6 +20,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "prosperity4bt"))
 
+import numpy as np
+from scipy.optimize import differential_evolution, NonlinearConstraint
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import Ridge
+
 import strategy.anirudh as anirudh_module
 from tuning.bt import load_prices, match_orders, DAYS
 from datamodel import OrderDepth, TradingState, Order, Observation, Listing
@@ -132,9 +137,62 @@ def run_combo(product: str, tiers: list[tuple]) -> tuple[float, float]:
     return product_pnl, total_pnl
 
 
+# ── Polynomial fit & optimise ─────────────────────────────────────────────────
+
+def _combo_to_vec(n_tiers: int, combo: dict) -> list[float]:
+    if n_tiers == 3:
+        return [combo["d1"], combo["f1"], combo["d2"], combo["f2"], combo["d3"]]
+    return [combo["d1"], combo["f1"], combo["d2"]]
+
+
+def _vec_to_tiers(n_tiers: int, keys: list[str], x: np.ndarray) -> list[tuple]:
+    combo = dict(zip(keys, x))
+    return _make_tiers(n_tiers, combo)
+
+
+def _bounds_from_grid(grid: dict) -> list[tuple]:
+    keys = [k for k in grid if not k.startswith("_")]
+    return [(min(grid[k]), max(grid[k])) for k in keys]
+
+
+def poly_optimise(product: str, n_tiers: int, keys: list[str], grid: dict,
+                  X: np.ndarray, y: np.ndarray, degree: int) -> list[tuple]:
+    poly = PolynomialFeatures(degree=degree, include_bias=True)
+    Xp = poly.fit_transform(X)
+    model = Ridge(alpha=1.0).fit(Xp, y)
+
+    bounds = _bounds_from_grid(grid)
+
+    def neg_pred(x):
+        xp = poly.transform(x.reshape(1, -1))
+        return -model.predict(xp)[0]
+
+    def constraint_valid(x):
+        combo = dict(zip(keys, x))
+        return 1.0 if _is_valid(n_tiers, combo) else -1.0
+
+    result = differential_evolution(
+        neg_pred, bounds,
+        constraints=NonlinearConstraint(constraint_valid, 0, np.inf),
+        seed=42, maxiter=2000, tol=1e-8, polish=True,
+    )
+
+    x_opt = result.x
+    pred_pnl = -result.fun
+    print(f"\nPoly (degree={degree}) predicted optimum: {pred_pnl:+,.0f}")
+    print(f"  raw x: {dict(zip(keys, x_opt))}")
+
+    # round distances to int, keep fractions as-is
+    rounded = []
+    for k, v in zip(keys, x_opt):
+        rounded.append(round(v) if k.startswith("d") else round(v, 3))
+    tiers = _vec_to_tiers(n_tiers, keys, np.array(rounded))
+    return tiers
+
+
 # ── Tuner ─────────────────────────────────────────────────────────────────────
 
-def tune(product: str) -> list[tuple]:
+def tune(product: str, poly_degree: int = 2) -> list[tuple]:
     if product not in PARAM_GRIDS:
         print(f"No grid for '{product}'. Run --list.")
         sys.exit(1)
@@ -152,11 +210,14 @@ def tune(product: str) -> list[tuple]:
 
     original_tiers = deepcopy(anirudh_module.TUNING_PARAMS[product]["tiers"])
     results = []
+    X_rows, y_vals = [], []
 
     for i, combo in enumerate(combos):
         tiers = _make_tiers(n, combo)
         prod_pnl, total_pnl = run_combo(product, tiers)
         results.append((prod_pnl, total_pnl, tiers))
+        X_rows.append(_combo_to_vec(n, combo))
+        y_vals.append(prod_pnl)
         tag = " | ".join(f"({d},{f})" for d, f in tiers)
         print(f"[{i+1:3d}/{len(combos)}] {tag}  →  {prod_pnl:+,.0f}")
 
@@ -165,15 +226,29 @@ def tune(product: str) -> list[tuple]:
     results.sort(key=lambda x: x[0], reverse=True)
 
     print(f"\n{'='*60}")
-    print(f"Top 10 by {product} PnL:")
+    print(f"Top 10 by {product} PnL (grid):")
     print(f"{'='*60}")
     for prod_pnl, total_pnl, tiers in results[:10]:
-        tag = str(tiers)
-        print(f"  {prod_pnl:+10,.0f}  (total {total_pnl:+,.0f})   {tag}")
+        print(f"  {prod_pnl:+10,.0f}  (total {total_pnl:+,.0f})   {tiers}")
 
-    best = results[0][2]
-    print(f"\nBest tiers for {product}: {best}")
-    return best
+    # polynomial fit
+    X = np.array(X_rows, dtype=float)
+    y = np.array(y_vals, dtype=float)
+    best_poly = poly_optimise(product, n, keys, grid, X, y, poly_degree)
+
+    # verify poly suggestion by actually running it
+    prod_pnl_poly, total_pnl_poly = run_combo(product, best_poly)
+    anirudh_module.TUNING_PARAMS[product]["tiers"] = original_tiers
+    print(f"  actual PnL: {prod_pnl_poly:+,.0f}  (total {total_pnl_poly:+,.0f})   {best_poly}")
+
+    # pick whichever is better
+    best_grid = results[0][2]
+    if prod_pnl_poly > results[0][0]:
+        print(f"\nPoly beats grid — using poly tiers: {best_poly}")
+        return best_poly
+    else:
+        print(f"\nGrid still best — using grid tiers: {best_grid}")
+        return best_grid
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -182,6 +257,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("product", nargs="?")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--degree", type=int, default=2)
     args = parser.parse_args()
 
     if args.list or not args.product:
@@ -190,7 +266,7 @@ def main():
             print(f"  {p}")
         sys.exit(0)
 
-    tune(args.product)
+    tune(args.product, poly_degree=args.degree)
 
 
 if __name__ == "__main__":
