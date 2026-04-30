@@ -151,9 +151,7 @@ btn_p2.on_clicked(on_p2)
 ax_chk = fig.add_axes([0.75, 0.60, 0.22, 0.12])
 ax_chk.set_facecolor("#1a1a2e")
 chk = CheckButtons(ax_chk, ["Show P1", "Show P2"], [True, True])
-for rect in chk.rectangles:
-    rect.set_facecolor("#0f3460")
-    rect.set_edgecolor("white")
+chk.set_check_props({"facecolor": "#0f3460"})
 for txt in chk.labels:
     txt.set_color("white")
 

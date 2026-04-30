@@ -6,11 +6,12 @@ For 2-tier products (SNACKPACK_*): sweeps d1, f1, d2        → tiers = [(d1,f1)
 
 Usage:
     python tuning/tune_anirudh.py GALAXY_SOUNDS_SOLAR_FLAMES
-    python tuning/tune_anirudh.py SNACKPACK_RASPBERRY
+    python tuning/tune_anirudh.py SNACKPACK_RASPBERRY --degree 3
     python tuning/tune_anirudh.py --list
 """
 
 import sys
+import csv
 import itertools
 import argparse
 from copy import deepcopy
@@ -20,19 +21,19 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "prosperity4bt"))
 
+import warnings
 import numpy as np
 from scipy.optimize import differential_evolution, NonlinearConstraint
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import Ridge
 
 import strategy.anirudh as anirudh_module
-from tuning.bt import load_prices, match_orders, DAYS
-from datamodel import OrderDepth, TradingState, Order, Observation, Listing
-import io, contextlib
+from tuning.bt_gpu import run_sweep
+
+RESULTS_DIR = PROJECT_ROOT / "tuning" / "results"
+RESULTS_DIR.mkdir(exist_ok=True)
 
 # ── Parameter grids ───────────────────────────────────────────────────────────
-# _tiers: number of grid tiers (2 or 3)
-# d1 < d2 < d3 enforced; f1 < f2 enforced; last tier fraction is always 1.0
 
 PARAM_GRIDS: dict[str, dict] = {
     "GALAXY_SOUNDS_SOLAR_FLAMES": {
@@ -83,6 +84,13 @@ def _make_tiers(n: int, combo: dict) -> list[tuple]:
             (combo["d2"], 1.0)]
 
 
+def _tiers_to_combo(tiers: list[tuple], n: int) -> dict:
+    if n == 2:
+        return {"d1": tiers[0][0], "f1": tiers[0][1], "d2": tiers[1][0]}
+    return {"d1": tiers[0][0], "f1": tiers[0][1],
+            "d2": tiers[1][0], "f2": tiers[1][1], "d3": tiers[2][0]}
+
+
 def _is_valid(n: int, combo: dict) -> bool:
     if n == 3:
         return (combo["d1"] < combo["d2"] < combo["d3"]
@@ -90,103 +98,61 @@ def _is_valid(n: int, combo: dict) -> bool:
     return combo["d1"] < combo["d2"]
 
 
-# ── Core runner ───────────────────────────────────────────────────────────────
-
-def run_combo(product: str, tiers: list[tuple]) -> tuple[float, float]:
-    anirudh_module.TUNING_PARAMS[product]["tiers"] = tiers
-    trader = anirudh_module.Trader()
-
-    positions: dict = {}
-    cash: dict = {}
-
-    for day in DAYS:
-        price_data = load_prices(day)
-        timestamps = sorted(price_data.keys())
-        products = set(p for ts in price_data.values() for p in ts)
-        trader_data = ""
-
-        for ts in timestamps:
-            order_depths = {}
-            ts_data = price_data[ts]
-            for prod in products:
-                if prod not in ts_data:
-                    continue
-                od = OrderDepth()
-                od.buy_orders = dict(ts_data[prod]["buy_orders"])
-                od.sell_orders = dict(ts_data[prod]["sell_orders"])
-                order_depths[prod] = od
-
-            state = TradingState(
-                traderData=trader_data,
-                timestamp=ts,
-                listings={p: Listing(p, p, 1) for p in order_depths},
-                order_depths=order_depths,
-                own_trades={},
-                market_trades={},
-                position=dict(positions),
-                observations=Observation({}, {}),
-            )
-            with contextlib.redirect_stdout(io.StringIO()):
-                orders_dict, _, trader_data = trader.run(state)
-            for prod, orders in orders_dict.items():
-                if prod in order_depths:
-                    match_orders(orders, order_depths, positions, cash)
-
-    product_pnl = cash.get(product, 0.0)
-    total_pnl = sum(cash.values())
-    return product_pnl, total_pnl
-
-
-# ── Polynomial fit & optimise ─────────────────────────────────────────────────
-
-def _combo_to_vec(n_tiers: int, combo: dict) -> list[float]:
-    if n_tiers == 3:
+def _combo_to_vec(n: int, combo: dict) -> list[float]:
+    if n == 3:
         return [combo["d1"], combo["f1"], combo["d2"], combo["f2"], combo["d3"]]
     return [combo["d1"], combo["f1"], combo["d2"]]
 
 
-def _vec_to_tiers(n_tiers: int, keys: list[str], x: np.ndarray) -> list[tuple]:
-    combo = dict(zip(keys, x))
-    return _make_tiers(n_tiers, combo)
+# ── CSV ───────────────────────────────────────────────────────────────────────
+
+def _save_csv(product: str, combos: list, keys: list, n: int, cash: np.ndarray):
+    path = RESULTS_DIR / f"{product}.csv"
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(keys + ["product_pnl", "tiers"])
+        for combo, pnl in zip(combos, cash):
+            w.writerow([combo[k] for k in keys] + [f"{pnl:.0f}", str(_make_tiers(n, combo))])
+    print(f"Results saved → {path}")
 
 
-def _bounds_from_grid(grid: dict) -> list[tuple]:
-    keys = [k for k in grid if not k.startswith("_")]
+# ── Polynomial fit & optimise ─────────────────────────────────────────────────
+
+def _bounds_from_grid(grid: dict, keys: list) -> list[tuple]:
     return [(min(grid[k]), max(grid[k])) for k in keys]
 
 
-def poly_optimise(product: str, n_tiers: int, keys: list[str], grid: dict,
-                  X: np.ndarray, y: np.ndarray, degree: int) -> list[tuple]:
+def poly_optimise(product: str, n: int, keys: list, grid: dict,
+                  X: np.ndarray, y: np.ndarray, degree: int,
+                  fixed_params: dict) -> list[tuple]:
     poly = PolynomialFeatures(degree=degree, include_bias=True)
     Xp = poly.fit_transform(X)
     model = Ridge(alpha=1.0).fit(Xp, y)
 
-    bounds = _bounds_from_grid(grid)
+    bounds = _bounds_from_grid(grid, keys)
 
     def neg_pred(x):
-        xp = poly.transform(x.reshape(1, -1))
-        return -model.predict(xp)[0]
+        return -model.predict(poly.transform(x.reshape(1, -1)))[0]
 
     def constraint_valid(x):
         combo = dict(zip(keys, x))
-        return 1.0 if _is_valid(n_tiers, combo) else -1.0
+        return 1.0 if _is_valid(n, combo) else -1.0
 
-    result = differential_evolution(
+    with warnings.catch_warnings():
+      warnings.simplefilter("ignore")
+      result = differential_evolution(
         neg_pred, bounds,
         constraints=NonlinearConstraint(constraint_valid, 0, np.inf),
-        seed=42, maxiter=2000, tol=1e-8, polish=True,
-    )
+          seed=42, maxiter=2000, tol=1e-8, polish=True,
+      )
 
     x_opt = result.x
     pred_pnl = -result.fun
     print(f"\nPoly (degree={degree}) predicted optimum: {pred_pnl:+,.0f}")
-    print(f"  raw x: {dict(zip(keys, x_opt))}")
+    print(f"  raw params: {dict(zip(keys, x_opt))}")
 
-    # round distances to int, keep fractions as-is
-    rounded = []
-    for k, v in zip(keys, x_opt):
-        rounded.append(round(v) if k.startswith("d") else round(v, 3))
-    tiers = _vec_to_tiers(n_tiers, keys, np.array(rounded))
+    rounded = [round(v) if k.startswith("d") else round(v, 3) for k, v in zip(keys, x_opt)]
+    tiers = _make_tiers(n, dict(zip(keys, rounded)))
     return tiers
 
 
@@ -197,58 +163,57 @@ def tune(product: str, poly_degree: int = 2) -> list[tuple]:
         print(f"No grid for '{product}'. Run --list.")
         sys.exit(1)
 
-    grid  = PARAM_GRIDS[product]
-    n     = grid["_tiers"]
-    keys  = [k for k in grid if not k.startswith("_")]
+    grid = PARAM_GRIDS[product]
+    n    = grid["_tiers"]
+    keys = [k for k in grid if not k.startswith("_")]
     combos = [dict(zip(keys, vals))
               for vals in itertools.product(*[grid[k] for k in keys])
               if _is_valid(n, dict(zip(keys, vals)))]
 
-    print(f"\n{'='*60}")
-    print(f"Tuning: {product}  ({len(combos)} valid combos × {len(DAYS)} days)")
-    print(f"{'='*60}\n")
-
-    original_tiers = deepcopy(anirudh_module.TUNING_PARAMS[product]["tiers"])
-    results = []
-    X_rows, y_vals = [], []
-
-    for i, combo in enumerate(combos):
-        tiers = _make_tiers(n, combo)
-        prod_pnl, total_pnl = run_combo(product, tiers)
-        results.append((prod_pnl, total_pnl, tiers))
-        X_rows.append(_combo_to_vec(n, combo))
-        y_vals.append(prod_pnl)
-        tag = " | ".join(f"({d},{f})" for d, f in tiers)
-        print(f"[{i+1:3d}/{len(combos)}] {tag}  →  {prod_pnl:+,.0f}")
-
-    anirudh_module.TUNING_PARAMS[product]["tiers"] = original_tiers
-
-    results.sort(key=lambda x: x[0], reverse=True)
+    fixed_params = anirudh_module.TUNING_PARAMS[product]
 
     print(f"\n{'='*60}")
-    print(f"Top 10 by {product} PnL (grid):")
+    print(f"Tuning: {product}  ({len(combos)} combos, GPU sweep)")
     print(f"{'='*60}")
-    for prod_pnl, total_pnl, tiers in results[:10]:
-        print(f"  {prod_pnl:+10,.0f}  (total {total_pnl:+,.0f})   {tiers}")
 
-    # polynomial fit
-    X = np.array(X_rows, dtype=float)
-    y = np.array(y_vals, dtype=float)
-    best_poly = poly_optimise(product, n, keys, grid, X, y, poly_degree)
+    # ── GPU sweep: all combos at once ────────────────────────────────────
+    cash_arr = run_sweep(product, combos, n, fixed_params)
 
-    # verify poly suggestion by actually running it
-    prod_pnl_poly, total_pnl_poly = run_combo(product, best_poly)
-    anirudh_module.TUNING_PARAMS[product]["tiers"] = original_tiers
-    print(f"  actual PnL: {prod_pnl_poly:+,.0f}  (total {total_pnl_poly:+,.0f})   {best_poly}")
+    _save_csv(product, combos, keys, n, cash_arr)
 
-    # pick whichever is better
-    best_grid = results[0][2]
-    if prod_pnl_poly > results[0][0]:
-        print(f"\nPoly beats grid — using poly tiers: {best_poly}")
-        return best_poly
+    # Build & sort results
+    results = sorted(zip(cash_arr, combos), key=lambda x: -x[0])
+
+    print(f"\nTop 10 by {product} PnL (grid):")
+    for pnl, combo in results[:10]:
+        tiers = _make_tiers(n, combo)
+        print(f"  {pnl:+10,.0f}   {tiers}")
+
+    # ── Polynomial fit & optimise ────────────────────────────────────────
+    X = np.array([_combo_to_vec(n, c) for c in combos], dtype=float)
+    y = cash_arr.astype(float)
+    best_poly_tiers = poly_optimise(product, n, keys, grid, X, y, poly_degree, fixed_params)
+
+    # Verify poly suggestion with GPU
+    poly_combo = _tiers_to_combo(best_poly_tiers, n)
+    poly_cash = run_sweep(product, [poly_combo], n, fixed_params)[0]
+    print(f"  actual PnL: {poly_cash:+,.0f}   {best_poly_tiers}")
+
+    # Append poly result to CSV
+    csv_path = RESULTS_DIR / f"{product}.csv"
+    with open(csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([poly_combo.get(k, "") for k in keys] + [f"{poly_cash:.0f}", f"POLY:{best_poly_tiers}"])
+
+    best_grid_pnl, best_grid_combo = results[0]
+    best_grid_tiers = _make_tiers(n, best_grid_combo)
+
+    if poly_cash > best_grid_pnl:
+        print(f"\nPoly beats grid (+{poly_cash - best_grid_pnl:,.0f}) — best: {best_poly_tiers}")
+        return best_poly_tiers
     else:
-        print(f"\nGrid still best — using grid tiers: {best_grid}")
-        return best_grid
+        print(f"\nGrid still best — best: {best_grid_tiers}")
+        return best_grid_tiers
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

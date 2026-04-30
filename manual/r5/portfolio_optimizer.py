@@ -71,4 +71,5 @@ def print_result(returns: dict[str, float]) -> None:
 
 
 if __name__ == "__main__":
-    print_result({"A": 0.2, "B": 0.04})
+    mult = 1.0
+    print_result({"A": 0.600*mult})

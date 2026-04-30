@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import matplotlib.widgets as mwidgets
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent / "../data"
+DATA_DIR = Path(__file__).parent / "../data/round5/"
 
 
 def load_prices(days: list[int]) -> pd.DataFrame:

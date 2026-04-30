@@ -436,7 +436,7 @@ class MidViz(QMainWindow):
 
         # SMA
         ind_layout.addWidget(self._ind_label('SMA'))
-        self._sma_period = self._spin(20, 1, 500)
+        self._sma_period = self._spin(20, 1, 999999)
         ind_layout.addWidget(self._sma_period)
         sma_btn = QPushButton('ADD')
         sma_btn.setFixedWidth(44)
@@ -447,7 +447,7 @@ class MidViz(QMainWindow):
 
         # EMA
         ind_layout.addWidget(self._ind_label('EMA'))
-        self._ema_period = self._spin(20, 1, 500)
+        self._ema_period = self._spin(20, 1, 999999)
         ind_layout.addWidget(self._ema_period)
         ema_btn = QPushButton('ADD')
         ema_btn.setFixedWidth(44)
@@ -458,13 +458,13 @@ class MidViz(QMainWindow):
 
         # Bollinger
         ind_layout.addWidget(self._ind_label('BB'))
-        self._bb_period = self._spin(20, 2, 500)
+        self._bb_period = self._spin(20, 2, 999999)
         ind_layout.addWidget(self._bb_period)
         self._bb_sigma = QDoubleSpinBox()
-        self._bb_sigma.setRange(0.1, 5.0)
+        self._bb_sigma.setRange(0.001, 999999.0)
         self._bb_sigma.setSingleStep(0.1)
         self._bb_sigma.setValue(2.0)
-        self._bb_sigma.setDecimals(1)
+        self._bb_sigma.setDecimals(3)
         self._bb_sigma.setFixedWidth(52)
         ind_layout.addWidget(self._bb_sigma)
         bb_btn = QPushButton('ADD')
@@ -484,7 +484,7 @@ class MidViz(QMainWindow):
         # VOL
         ind_layout.addWidget(self._vsep())
         ind_layout.addWidget(self._ind_label('VOL'))
-        self._vol_period = self._spin(20, 2, 500)
+        self._vol_period = self._spin(20, 2, 999999)
         ind_layout.addWidget(self._vol_period)
         vol_btn = QPushButton('ADD')
         vol_btn.setFixedWidth(44)

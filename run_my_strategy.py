@@ -10,7 +10,7 @@ sys.path.append(str(project_root))
 sys.path.append(str(project_root / "prosperity4bt"))
 
 try:
-    from strategy.main import Trader
+    from strategy.trend_follow import Trader
     from prosperity4bt import run_backtest
 except ImportError as e:
     print(f"Error importing modules: {e}")
