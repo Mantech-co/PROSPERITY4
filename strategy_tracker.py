@@ -4,7 +4,7 @@ from __future__ import annotations
 # HARDCODED DEFAULTS — fill these in once
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_REPO  = "ManukrishnanP/prosperity4-strategy-tracker"
-DEFAULT_TOKEN = "github_pat_14mn07r3v34L1ngmy70k3n"
+DEFAULT_TOKEN = "github_pat_14mn07r3v34L1ngmy70k3n" # Big brain move looking into commit history but the key is expired
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
