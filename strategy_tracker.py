@@ -3,8 +3,8 @@ from __future__ import annotations
 # ─────────────────────────────────────────────────────────────────────────────
 # HARDCODED DEFAULTS — fill these in once
 # ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_REPO  = "ManukrishnanP/prosperity4-strategy-tracker"   # e.g. "yourorg/team-strategies"
-DEFAULT_TOKEN = "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"   # e.g. "ghp_xxxxxxxxxxxxxxxxxxxx"
+DEFAULT_REPO  = "ManukrishnanP/prosperity4-strategy-tracker"
+DEFAULT_TOKEN = "github_pat_14mn07r3v34L1ngmy70k3n"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
